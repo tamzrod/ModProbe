@@ -14,6 +14,14 @@ Server binds to `localhost:8080` by default. Override with `BIND_ADDR`, for exam
 BIND_ADDR=127.0.0.1:9090 go run .
 ```
 
+### Docker Compose
+
+```bash
+docker compose up --build
+```
+
+This starts ModProbe on `http://localhost:8080`.
+
 ## API
 
 Basic mode:
