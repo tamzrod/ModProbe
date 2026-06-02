@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -117,13 +118,13 @@ registers:
 		t.Fatalf("unexpected import status: %d", res.StatusCode)
 	}
 
-	res, err = http.Get(ts.URL + "/api/scan/40020-40020")
+	res, err = http.Get(ts.URL + "/api/read/40020?quantity=1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected scan status: %d", res.StatusCode)
+		t.Fatalf("unexpected read status: %d", res.StatusCode)
 	}
 
 	res, err = http.Get(ts.URL + "/api/parse/40020")
@@ -140,6 +141,15 @@ registers:
 	}
 	if parsed["value"] != "Overvoltage" {
 		t.Fatalf("unexpected parsed value: %v", parsed["value"])
+	}
+
+	res, err = http.Get(ts.URL + "/api/scan/40020-40020")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected scan status: %d", res.StatusCode)
 	}
 
 	res, err = http.Get(ts.URL + "/api/profile")
@@ -166,7 +176,7 @@ func TestParseByType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.(float64) != 1 {
+	if math.Abs(v.(float64)-1) > 1e-9 {
 		t.Fatalf("unexpected float32 value: %v", v)
 	}
 

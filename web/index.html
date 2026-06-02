@@ -65,16 +65,16 @@
 
 <script>
 const mode = document.getElementById('mode');
-const adv = document.getElementById('advanced');
+const advancedPanel = document.getElementById('advanced');
 mode.addEventListener('change', () => {
-  adv.style.display = mode.value === 'advanced' ? 'block' : 'none';
+  advancedPanel.style.display = mode.value === 'advanced' ? 'block' : 'none';
 });
 
 function show(id, data) {
   document.getElementById(id).textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 
-async function jsonFetch(url, opts={}) {
+async function apiFetch(url, opts={}) {
   const res = await fetch(url, opts);
   const text = await res.text();
   try {
@@ -84,36 +84,36 @@ async function jsonFetch(url, opts={}) {
   }
 }
 
-document.getElementById('statusBtn').onclick = async () => show('statusOut', await jsonFetch('/api/status'));
+document.getElementById('statusBtn').onclick = async () => show('statusOut', await apiFetch('/api/status'));
 document.getElementById('readBtn').onclick = async () => {
   const addr = document.getElementById('readAddr').value;
   const qty = document.getElementById('readQty').value || '1';
-  show('basicOut', await jsonFetch(`/api/read/${addr}?quantity=${qty}`));
+  show('basicOut', await apiFetch(`/api/read/${addr}?quantity=${qty}`));
 };
 document.getElementById('writeBtn').onclick = async () => {
   const addr = document.getElementById('writeAddr').value;
-  const values = document.getElementById('writeVals').value.split(',').map(x => Number(x.trim())).filter(x => !Number.isNaN(x));
-  show('basicOut', await jsonFetch(`/api/write/${addr}`, {
+  const values = document.getElementById('writeVals').value.split(',').map(rawValue => Number(rawValue.trim())).filter(numericValue => !Number.isNaN(numericValue));
+  show('basicOut', await apiFetch(`/api/write/${addr}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values })
   }));
 };
 document.getElementById('parseBtn').onclick = async () => {
   const addr = document.getElementById('parseAddr').value;
-  show('advancedOut', await jsonFetch(`/api/parse/${addr}`));
+  show('advancedOut', await apiFetch(`/api/parse/${addr}`));
 };
 document.getElementById('scanBtn').onclick = async () => {
-  const s = document.getElementById('scanStart').value;
-  const e = document.getElementById('scanEnd').value;
-  show('advancedOut', await jsonFetch(`/api/scan/${s}-${e}`));
+  const scanStart = document.getElementById('scanStart').value;
+  const scanEnd = document.getElementById('scanEnd').value;
+  show('advancedOut', await apiFetch(`/api/scan/${scanStart}-${scanEnd}`));
 };
 document.getElementById('importBtn').onclick = async () => {
-  const f = document.getElementById('profileFile').files[0];
-  if (!f) return show('advancedOut', 'Select a YAML file first');
+  const selectedFile = document.getElementById('profileFile').files[0];
+  if (!selectedFile) return show('advancedOut', 'Select a YAML file first');
   const form = new FormData();
-  form.append('file', f);
-  show('advancedOut', await jsonFetch('/api/profile/import', { method: 'POST', body: form }));
+  form.append('file', selectedFile);
+  show('advancedOut', await apiFetch('/api/profile/import', { method: 'POST', body: form }));
 };
-document.getElementById('getProfileBtn').onclick = async () => show('advancedOut', await jsonFetch('/api/profile'));
+document.getElementById('getProfileBtn').onclick = async () => show('advancedOut', await apiFetch('/api/profile'));
 document.getElementById('exportProfileBtn').onclick = async () => {
   const res = await fetch('/api/profile/export');
   const txt = await res.text();

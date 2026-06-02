@@ -75,6 +75,12 @@ type state struct {
 	profRaw      []byte
 }
 
+// maxProfileSize bounds profile uploads to prevent excessive memory use.
+const maxProfileSize int64 = 2 * 1024 * 1024
+const defaultModbusAddr = "127.0.0.1:502"
+const defaultBindAddr = "localhost:8080"
+const defaultModbusTimeout = 500 * time.Millisecond
+
 func newState(client mbClient) *state {
 	return &state{client: client, cache: map[int][]uint16{}}
 }
@@ -120,6 +126,13 @@ func parseAddress(path, prefix string) (int, error) {
 	return v, nil
 }
 
+func toUint16(v int) (uint16, error) {
+	if v < 0 || v > math.MaxUint16 {
+		return 0, errors.New("value out of range")
+	}
+	return uint16(v), nil
+}
+
 func decodeRegisters(data []byte) []uint16 {
 	regs := make([]uint16, 0, len(data)/2)
 	for i := 0; i+1 < len(data); i += 2 {
@@ -153,7 +166,17 @@ func (s *state) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	b, err := s.client.ReadHoldingRegisters(uint16(addr), uint16(qty))
+	addr16, err := toUint16(addr)
+	if err != nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	qty16, err := toUint16(qty)
+	if err != nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid quantity"})
+		return
+	}
+	b, err := s.client.ReadHoldingRegisters(addr16, qty16)
 	s.setPoll(err)
 	if err != nil {
 		jsonWrite(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
@@ -182,13 +205,22 @@ func (s *state) handleWrite(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		Values []uint16 `json:"values"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || len(payload.Values) == 0 {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "body must contain non-empty values"})
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
+		return
+	}
+	if len(payload.Values) == 0 {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "values array cannot be empty"})
 		return
 	}
 
 	if len(payload.Values) == 1 {
-		_, err = s.client.WriteSingleRegister(uint16(addr), payload.Values[0])
+		addr16, convErr := toUint16(addr)
+		if convErr != nil {
+			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": convErr.Error()})
+			return
+		}
+		_, err = s.client.WriteSingleRegister(addr16, payload.Values[0])
 	} else {
 		buf := bytes.NewBuffer(nil)
 		for _, v := range payload.Values {
@@ -197,7 +229,17 @@ func (s *state) handleWrite(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		_, err = s.client.WriteMultipleRegisters(uint16(addr), uint16(len(payload.Values)), buf.Bytes())
+		addr16, convErr := toUint16(addr)
+		if convErr != nil {
+			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": convErr.Error()})
+			return
+		}
+		qty16, convErr := toUint16(len(payload.Values))
+		if convErr != nil {
+			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "too many values"})
+			return
+		}
+		_, err = s.client.WriteMultipleRegisters(addr16, qty16, buf.Bytes())
 	}
 
 	s.setPoll(err)
@@ -229,7 +271,7 @@ func (s *state) requireProfile() (*profile, []byte, bool) {
 	if s.prof == nil {
 		return nil, nil, false
 	}
-	return s.prof, append([]byte(nil), s.profRaw...), true
+	return s.prof, bytes.Clone(s.profRaw), true
 }
 
 func (s *state) handleProfile(w http.ResponseWriter, r *http.Request) {
@@ -248,7 +290,7 @@ func (s *state) handleProfile(w http.ResponseWriter, r *http.Request) {
 
 func readProfileUpload(r *http.Request) ([]byte, error) {
 	if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
-		if err := r.ParseMultipartForm(2 << 20); err != nil {
+		if err := r.ParseMultipartForm(maxProfileSize); err != nil {
 			return nil, err
 		}
 		for _, files := range r.MultipartForm.File {
@@ -258,11 +300,11 @@ func readProfileUpload(r *http.Request) ([]byte, error) {
 		}
 		return nil, errors.New("no file uploaded")
 	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, (2<<20)+1))
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxProfileSize+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > 2<<20 {
+	if int64(len(raw)) > maxProfileSize {
 		return nil, errors.New("payload too large")
 	}
 	return raw, nil
@@ -274,7 +316,7 @@ func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, 2<<20))
+	return io.ReadAll(io.LimitReader(f, maxProfileSize))
 }
 
 func (s *state) handleImportProfile(w http.ResponseWriter, r *http.Request) {
@@ -296,7 +338,7 @@ func (s *state) handleImportProfile(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.prof = &p
-	s.profRaw = append([]byte(nil), raw...)
+	s.profRaw = bytes.Clone(raw)
 	s.mu.Unlock()
 
 	jsonWrite(w, http.StatusOK, map[string]any{"status": "imported", "register_count": len(p.Registers)})
@@ -329,7 +371,7 @@ func (s *state) handleParse(w http.ResponseWriter, r *http.Request) {
 	}
 	p, _, ok := s.requireProfile()
 	if !ok {
-		jsonWrite(w, http.StatusPreconditionRequired, map[string]string{"error": "profile required"})
+		jsonWrite(w, http.StatusPreconditionFailed, map[string]string{"error": "profile required"})
 		return
 	}
 
@@ -420,13 +462,18 @@ func (s *state) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, _, ok := s.requireProfile(); !ok {
-		jsonWrite(w, http.StatusPreconditionRequired, map[string]string{"error": "profile required"})
+		jsonWrite(w, http.StatusPreconditionFailed, map[string]string{"error": "profile required"})
 		return
 	}
 
 	results := make([]map[string]any, 0, end-start+1)
 	for addr := start; addr <= end; addr++ {
-		b, err := s.client.ReadHoldingRegisters(uint16(addr), 1)
+		addr16, convErr := toUint16(addr)
+		if convErr != nil {
+			results = append(results, map[string]any{"address": addr, "ok": false, "error": convErr.Error()})
+			continue
+		}
+		b, err := s.client.ReadHoldingRegisters(addr16, 1)
 		if err != nil {
 			results = append(results, map[string]any{"address": addr, "ok": false, "error": err.Error()})
 			continue
@@ -442,8 +489,12 @@ func (s *state) handleScan(w http.ResponseWriter, r *http.Request) {
 }
 
 func newLiveClient() mbClient {
-	handler := modbus.NewTCPClientHandler("127.0.0.1:502")
-	handler.Timeout = 500 * time.Millisecond
+	modbusAddr := os.Getenv("MODBUS_ADDR")
+	if modbusAddr == "" {
+		modbusAddr = defaultModbusAddr
+	}
+	handler := modbus.NewTCPClientHandler(modbusAddr)
+	handler.Timeout = defaultModbusTimeout
 	if err := handler.Connect(); err != nil {
 		log.Printf("modbus connect failed: %v", err)
 		return &simClient{}
@@ -472,14 +523,14 @@ func (s *simClient) WriteMultipleRegisters(address, quantity uint16, value []byt
 func main() {
 	bindAddr := os.Getenv("BIND_ADDR")
 	if bindAddr == "" {
-		bindAddr = "localhost:8080"
+		bindAddr = defaultBindAddr
 	}
 
 	st := newState(newLiveClient())
 	if cwd, err := os.Getwd(); err == nil {
 		log.Printf("serving web assets from %s", filepath.Join(cwd, "web"))
 	}
-	log.Printf("modprobe listening on http://%s", bindAddr)
+	log.Printf("ModProbe listening on http://%s", bindAddr)
 	if err := http.ListenAndServe(bindAddr, st.routes()); err != nil {
 		log.Fatal(err)
 	}
