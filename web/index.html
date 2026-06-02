@@ -203,7 +203,12 @@ function renderRows() {
         decTd.title = 'Double-click to edit';
         decTd.ondblclick = () => {
           decTd.focus();
-          document.execCommand('selectAll', false, null);
+          const selection = window.getSelection();
+          if (!selection) return;
+          const range = document.createRange();
+          range.selectNodeContents(decTd);
+          selection.removeAllRanges();
+          selection.addRange(range);
         };
         decTd.onblur = () => {
           const parsed = Number(decTd.textContent.trim());

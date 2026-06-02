@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,7 @@ const (
 	maxPollIntervalMS    = 60000
 	maxRegisterReadCount = 125
 	maxBitReadCount      = 2000
+	maxRequestBodySize   = 1 << 20
 )
 
 type connectionConfig struct {
@@ -246,17 +248,14 @@ func (a *appState) snapshotRows() []rowResult {
 	for _, row := range a.rows {
 		rows = append(rows, row)
 	}
-	for i := 0; i < len(rows)-1; i++ {
-		for j := i + 1; j < len(rows); j++ {
-			if rows[i].Address > rows[j].Address {
-				rows[i], rows[j] = rows[j], rows[i]
-			}
-		}
-	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Address < rows[j].Address })
 	return rows
 }
 
 func (a *appState) readRange(cfg normalizedConfig, startAddress, quantity int) ([]rowResult, error) {
+	if quantity < 1 || quantity > maxQuantityForFunction(cfg.FunctionCode) {
+		return nil, errors.New("invalid quantity for function code")
+	}
 	startDevice, err := humanAddressToDevice(startAddress)
 	if err != nil {
 		return nil, err
@@ -300,6 +299,9 @@ func (a *appState) readRange(cfg normalizedConfig, startAddress, quantity int) (
 }
 
 func decodeReadPayload(functionCode uint8, payload []byte, quantity int) ([]uint16, error) {
+	if quantity < 1 || quantity > maxQuantityForFunction(functionCode) {
+		return nil, errors.New("invalid quantity for function code")
+	}
 	if len(payload) < 1 {
 		return nil, errors.New("malformed payload")
 	}
@@ -307,6 +309,7 @@ func decodeReadPayload(functionCode uint8, payload []byte, quantity int) ([]uint
 	if len(payload[1:]) < byteCount {
 		return nil, errors.New("short payload")
 	}
+
 	data := payload[1 : 1+byteCount]
 	values := make([]uint16, 0, quantity)
 
@@ -337,6 +340,13 @@ func decodeReadPayload(functionCode uint8, payload []byte, quantity int) ([]uint
 		return nil, errors.New("unsupported function code")
 	}
 	return values, nil
+}
+
+func maxQuantityForFunction(functionCode uint8) int {
+	if functionCode == 1 || functionCode == 2 {
+		return maxBitReadCount
+	}
+	return maxRegisterReadCount
 }
 
 func (a *appState) readSingle(cfg normalizedConfig, address int) (rowResult, error) {
@@ -478,7 +488,7 @@ func jsonWrite(w http.ResponseWriter, status int, payload any) {
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
 	defer r.Body.Close()
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
