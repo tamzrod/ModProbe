@@ -5,120 +5,386 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>ModProbe</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 1rem; max-width: 900px; }
-    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
-    input, button, select, textarea { padding: 0.4rem; }
-    .panel { border: 1px solid #ddd; border-radius: 6px; padding: 0.8rem; margin-bottom: 1rem; }
-    #advanced { display: none; }
-    pre { background: #f6f8fa; padding: 0.7rem; overflow: auto; }
+    body { font-family: Arial, sans-serif; margin: 1rem; background: #f8fafc; color: #0f172a; }
+    h1 { margin-bottom: 0.5rem; }
+    .panel { background: #fff; border: 1px solid #dbe2ea; border-radius: 8px; padding: 0.85rem; margin-bottom: 0.9rem; }
+    .panel h2 { margin-top: 0; margin-bottom: 0.65rem; font-size: 1.1rem; }
+    .row { display: flex; gap: 0.55rem; flex-wrap: wrap; align-items: center; margin-bottom: 0.5rem; }
+    label { font-size: 0.9rem; font-weight: 600; display: inline-flex; flex-direction: column; gap: 0.25rem; }
+    input, select, button { padding: 0.4rem 0.55rem; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 0.9rem; }
+    input[type="checkbox"] { width: 18px; height: 18px; }
+    button { cursor: pointer; background: #fff; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    table { width: 100%; border-collapse: collapse; background: #fff; }
+    th, td { border: 1px solid #dbe2ea; padding: 0.5rem; font-size: 0.88rem; text-align: left; }
+    th { background: #f1f5f9; }
+    .dec-editable { cursor: text; background: #f8fafc; }
+    .coil-toggle { cursor: pointer; font-weight: 600; }
+    .dirty { background: #fff7cc; }
+    .actions { display: flex; gap: 0.4rem; }
+    .status-bar { display: flex; gap: 0.8rem; flex-wrap: wrap; font-size: 0.88rem; }
+    .status-pill { padding: 0.2rem 0.5rem; border-radius: 999px; font-weight: 700; }
+    .ok { background: #dcfce7; color: #166534; }
+    .bad { background: #fee2e2; color: #991b1b; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   </style>
 </head>
 <body>
-  <h1>ModProbe</h1>
+  <h1>ModProbe - Basic Mode</h1>
 
   <div class="panel">
+    <h2>Config Panel</h2>
     <div class="row">
-      <label for="mode">Mode</label>
-      <select id="mode">
-        <option value="basic">Basic</option>
-        <option value="advanced">Advanced</option>
-      </select>
-      <button id="statusBtn" type="button">Refresh Status</button>
+      <label>IP:Port
+        <input id="target" type="text" value="127.0.0.1:502" />
+      </label>
+      <label>Unit ID
+        <input id="unitId" type="number" min="0" max="255" value="1" />
+      </label>
+      <label>Timeout ms
+        <input id="timeoutMs" type="number" min="1" value="500" />
+      </label>
+      <label>Function Code
+        <select id="functionCode">
+          <option value="1">01 Coils</option>
+          <option value="2">02 Discrete Inputs</option>
+          <option value="3" selected>03 Holding Registers</option>
+          <option value="4">04 Input Registers</option>
+        </select>
+      </label>
+      <label>Start Address
+        <input id="startAddress" type="number" min="1" value="40001" />
+      </label>
+      <label>Quantity
+        <input id="quantity" type="number" min="1" value="10" />
+      </label>
     </div>
-    <pre id="statusOut"></pre>
   </div>
 
-  <div class="panel" id="basic">
-    <h2>Basic</h2>
+  <div class="panel">
+    <h2>Polling Controls</h2>
     <div class="row">
-      <input id="readAddr" type="number" placeholder="Address" />
-      <input id="readQty" type="number" placeholder="Quantity" value="1" min="1" />
-      <button id="readBtn" type="button">Read</button>
+      <label style="flex-direction: row; align-items: center; gap: 0.4rem; font-weight: 700;">Poll Enable
+        <input id="pollEnable" type="checkbox" />
+      </label>
+      <label>Interval ms
+        <input id="intervalMs" type="number" min="1" value="1000" />
+      </label>
+      <button id="readAllBtn" type="button">READ ALL</button>
+      <span id="errorText" style="color: #b91c1c; font-weight: 600;"></span>
     </div>
-    <div class="row">
-      <input id="writeAddr" type="number" placeholder="Address" />
-      <input id="writeVals" type="text" placeholder="Comma-separated values" />
-      <button id="writeBtn" type="button">Write</button>
-    </div>
-    <pre id="basicOut"></pre>
   </div>
 
-  <div class="panel" id="advanced">
-    <h2>Advanced</h2>
-    <div class="row">
-      <input id="parseAddr" type="number" placeholder="Parse Address" />
-      <button id="parseBtn" type="button">Parse Cached</button>
+  <div class="panel">
+    <h2>Output Table</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Address</th>
+          <th>Value (Hex)</th>
+          <th>Value (Dec)</th>
+          <th>Exception</th>
+          <th>Timestamp</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="rowsBody"></tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Status Bar</h2>
+    <div class="status-bar">
+      <div>Connection: <span id="connStatus" class="status-pill bad">UNKNOWN</span></div>
+      <div>Last read: <span id="lastRead" class="mono">-</span></div>
+      <div>Polling: <span id="pollStatus" class="mono">Stopped</span></div>
     </div>
-    <div class="row">
-      <input id="scanStart" type="number" placeholder="Scan Start" />
-      <input id="scanEnd" type="number" placeholder="Scan End" />
-      <button id="scanBtn" type="button">Scan</button>
-    </div>
-    <div class="row">
-      <input id="profileFile" type="file" accept=".yaml,.yml,text/yaml,application/x-yaml" />
-      <button id="importBtn" type="button">Import Profile</button>
-      <button id="getProfileBtn" type="button">Get Profile</button>
-      <button id="exportProfileBtn" type="button">Export Profile</button>
-    </div>
-    <pre id="advancedOut"></pre>
   </div>
 
 <script>
-const mode = document.getElementById('mode');
-const advancedPanel = document.getElementById('advanced');
-mode.addEventListener('change', () => {
-  advancedPanel.style.display = mode.value === 'advanced' ? 'block' : 'none';
-});
+const rowsByAddress = new Map();
+const dirtyRows = new Set();
 
-function show(id, data) {
-  document.getElementById(id).textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+const el = {
+  target: document.getElementById('target'),
+  unitId: document.getElementById('unitId'),
+  timeoutMs: document.getElementById('timeoutMs'),
+  functionCode: document.getElementById('functionCode'),
+  startAddress: document.getElementById('startAddress'),
+  quantity: document.getElementById('quantity'),
+  pollEnable: document.getElementById('pollEnable'),
+  intervalMs: document.getElementById('intervalMs'),
+  readAllBtn: document.getElementById('readAllBtn'),
+  rowsBody: document.getElementById('rowsBody'),
+  connStatus: document.getElementById('connStatus'),
+  lastRead: document.getElementById('lastRead'),
+  pollStatus: document.getElementById('pollStatus'),
+  errorText: document.getElementById('errorText')
+};
+
+let statusTimer = null;
+
+function getConfig() {
+  return {
+    target: el.target.value.trim(),
+    unit_id: Number(el.unitId.value),
+    timeout_ms: Number(el.timeoutMs.value),
+    function_code: Number(el.functionCode.value),
+    start_address: Number(el.startAddress.value),
+    quantity: Number(el.quantity.value)
+  };
 }
 
-async function apiFetch(url, opts={}) {
-  const res = await fetch(url, opts);
+function isWriteMode() {
+  const fc = Number(el.functionCode.value);
+  return fc === 1 || fc === 3;
+}
+
+function isPolling() {
+  return el.pollEnable.checked;
+}
+
+function formatHexValue(functionCode, value) {
+  if (functionCode === 1) {
+    return value === 0 ? '0x0000' : '0x0001';
+  }
+  return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
+function setError(message = '') {
+  el.errorText.textContent = message;
+}
+
+async function apiFetch(path, payload) {
+  const opts = payload
+    ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+    : { method: 'GET' };
+  const res = await fetch(path, opts);
   const text = await res.text();
+  let data = {};
+  if (text) {
+    try { data = JSON.parse(text); } catch { data = { error: text }; }
+  }
+  if (!res.ok) {
+    throw new Error(data.error || `HTTP ${res.status}`);
+  }
+  return data;
+}
+
+function renderRows() {
+  const canWrite = isWriteMode();
+  const readOnlyTable = isPolling();
+  const rows = Array.from(rowsByAddress.values()).sort((a, b) => a.address - b.address);
+  el.rowsBody.innerHTML = '';
+
+  rows.forEach((row) => {
+    const tr = document.createElement('tr');
+    if (dirtyRows.has(row.address)) tr.classList.add('dirty');
+
+    const addressTd = document.createElement('td');
+    addressTd.textContent = String(row.address);
+
+    const hexTd = document.createElement('td');
+    hexTd.textContent = row.value_hex || '';
+
+    const decTd = document.createElement('td');
+    decTd.textContent = String(row.value_dec ?? '');
+
+    if (canWrite && !readOnlyTable) {
+      if (Number(el.functionCode.value) === 1) {
+        decTd.classList.add('coil-toggle');
+        decTd.title = 'Click to toggle ON/OFF';
+        decTd.onclick = () => {
+          const next = Number(row.value_dec) === 0 ? 1 : 0;
+          row.value_dec = next;
+          row.value_hex = formatHexValue(1, next);
+          row.exception = '';
+          row.timestamp = new Date().toISOString();
+          rowsByAddress.set(row.address, row);
+          dirtyRows.add(row.address);
+          renderRows();
+        };
+      } else {
+        decTd.classList.add('dec-editable');
+        decTd.contentEditable = 'true';
+        decTd.title = 'Double-click to edit';
+        decTd.ondblclick = () => {
+          decTd.focus();
+          const selection = window.getSelection();
+          if (!selection) return;
+          const range = document.createRange();
+          range.selectNodeContents(decTd);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        };
+        decTd.onblur = () => {
+          const functionCode = Number(el.functionCode.value);
+          const parsed = Number(decTd.textContent.trim());
+          if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+            decTd.textContent = String(row.value_dec ?? '');
+            return;
+          }
+          if (functionCode === 1 && parsed !== 0 && parsed !== 1) {
+            decTd.textContent = String(row.value_dec ?? '');
+            return;
+          }
+          row.value_dec = parsed;
+          row.value_hex = formatHexValue(functionCode, parsed);
+          row.exception = '';
+          row.timestamp = new Date().toISOString();
+          rowsByAddress.set(row.address, row);
+          dirtyRows.add(row.address);
+          renderRows();
+        };
+      }
+    }
+
+    const exceptionTd = document.createElement('td');
+    exceptionTd.textContent = row.exception || '';
+
+    const timestampTd = document.createElement('td');
+    timestampTd.textContent = row.timestamp || '';
+
+    const actionTd = document.createElement('td');
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'actions';
+
+    const readBtn = document.createElement('button');
+    readBtn.type = 'button';
+    readBtn.textContent = 'READ';
+    readBtn.onclick = () => readSingleRow(row.address);
+    actionsDiv.appendChild(readBtn);
+
+    if (canWrite) {
+      const writeBtn = document.createElement('button');
+      writeBtn.type = 'button';
+      writeBtn.textContent = 'WRITE';
+      writeBtn.disabled = readOnlyTable || !dirtyRows.has(row.address);
+      writeBtn.onclick = () => writeSingleRow(row.address);
+      actionsDiv.appendChild(writeBtn);
+    }
+
+    actionTd.appendChild(actionsDiv);
+    tr.append(addressTd, hexTd, decTd, exceptionTd, timestampTd, actionTd);
+    el.rowsBody.appendChild(tr);
+  });
+}
+
+function syncRows(rows) {
+  rows.forEach((row) => {
+    rowsByAddress.set(row.address, row);
+    dirtyRows.delete(row.address);
+  });
+  renderRows();
+}
+
+async function readAll() {
+  setError('');
   try {
-    return { ok: res.ok, status: res.status, data: JSON.parse(text) };
-  } catch {
-    return { ok: res.ok, status: res.status, data: text };
+    const data = await apiFetch('/api/read/bulk', { config: getConfig() });
+    syncRows(data.rows || []);
+    await refreshStatus();
+  } catch (err) {
+    setError(err.message);
   }
 }
 
-document.getElementById('statusBtn').onclick = async () => show('statusOut', await apiFetch('/api/status'));
-document.getElementById('readBtn').onclick = async () => {
-  const addr = document.getElementById('readAddr').value;
-  const qty = document.getElementById('readQty').value || '1';
-  show('basicOut', await apiFetch(`/api/read/${addr}?quantity=${qty}`));
-};
-document.getElementById('writeBtn').onclick = async () => {
-  const addr = document.getElementById('writeAddr').value;
-  const values = document.getElementById('writeVals').value.split(',').map(rawValue => Number(rawValue.trim())).filter(numericValue => !Number.isNaN(numericValue));
-  show('basicOut', await apiFetch(`/api/write/${addr}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values })
-  }));
-};
-document.getElementById('parseBtn').onclick = async () => {
-  const addr = document.getElementById('parseAddr').value;
-  show('advancedOut', await apiFetch(`/api/parse/${addr}`));
-};
-document.getElementById('scanBtn').onclick = async () => {
-  const scanStart = document.getElementById('scanStart').value;
-  const scanEnd = document.getElementById('scanEnd').value;
-  show('advancedOut', await apiFetch(`/api/scan/${scanStart}-${scanEnd}`));
-};
-document.getElementById('importBtn').onclick = async () => {
-  const selectedFile = document.getElementById('profileFile').files[0];
-  if (!selectedFile) return show('advancedOut', 'Select a YAML file first');
-  const form = new FormData();
-  form.append('file', selectedFile);
-  show('advancedOut', await apiFetch('/api/profile/import', { method: 'POST', body: form }));
-};
-document.getElementById('getProfileBtn').onclick = async () => show('advancedOut', await apiFetch('/api/profile'));
-document.getElementById('exportProfileBtn').onclick = async () => {
-  const res = await fetch('/api/profile/export');
-  const txt = await res.text();
-  show('advancedOut', txt);
-};
+async function readSingleRow(address) {
+  setError('');
+  try {
+    const data = await apiFetch('/api/read/single', { config: getConfig(), address });
+    if (data.row) {
+      rowsByAddress.set(address, data.row);
+      dirtyRows.delete(address);
+      renderRows();
+    }
+    await refreshStatus();
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function writeSingleRow(address) {
+  const row = rowsByAddress.get(address);
+  if (!row) return;
+  setError('');
+  try {
+    const data = await apiFetch('/api/write/single', {
+      config: getConfig(),
+      address,
+      value: Number(row.value_dec)
+    });
+    if (data.row) {
+      rowsByAddress.set(address, data.row);
+      dirtyRows.delete(address);
+      renderRows();
+    }
+    await refreshStatus();
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function refreshStatus() {
+  try {
+    const status = await apiFetch('/api/status');
+    el.connStatus.textContent = status.connected ? 'CONNECTED' : 'DISCONNECTED';
+    el.connStatus.className = `status-pill ${status.connected ? 'ok' : 'bad'}`;
+    el.lastRead.textContent = status.last_read_timestamp || '-';
+    el.pollStatus.textContent = status.polling_active
+      ? `Running (${status.polling_interval_ms} ms)`
+      : 'Stopped';
+    if (status.polling_active && Array.isArray(status.rows)) {
+      syncRows(status.rows);
+    }
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+async function startPolling() {
+  setError('');
+  try {
+    await apiFetch('/api/polling/start', {
+      config: getConfig(),
+      interval_ms: Number(el.intervalMs.value)
+    });
+    renderRows();
+    await refreshStatus();
+  } catch (err) {
+    setError(err.message);
+    el.pollEnable.checked = false;
+  }
+}
+
+async function stopPolling() {
+  setError('');
+  try {
+    await apiFetch('/api/polling/stop', {});
+    renderRows();
+    await refreshStatus();
+  } catch (err) {
+    setError(err.message);
+  }
+}
+
+function ensureStatusTimer() {
+  if (statusTimer) return;
+  statusTimer = setInterval(refreshStatus, 1000);
+}
+
+el.readAllBtn.addEventListener('click', readAll);
+el.functionCode.addEventListener('change', renderRows);
+el.pollEnable.addEventListener('change', async () => {
+  if (el.pollEnable.checked) {
+    await startPolling();
+  } else {
+    await stopPolling();
+  }
+});
+
+ensureStatusTimer();
+readAll();
 </script>
 </body>
 </html>

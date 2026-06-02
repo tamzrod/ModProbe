@@ -2,75 +2,74 @@
 
 ## Overview
 
-ModProbe is a single Go service with one binary (`main.go`) that:
+ModProbe is a single Go service that serves a static single-page web UI and exposes JSON APIs for Modbus diagnostics in basic mode.
 
-- establishes a Modbus TCP client (`goburrow/modbus`)
-- serves a static web UI from `/web`
-- exposes JSON/YAML HTTP endpoints under `/api/*`
-- keeps runtime cache/profile/status in an in-memory shared state
+Core components:
 
-## Runtime Components
+- HTTP API handlers under `/api/*`
+- Static frontend from `/web`
+- In-memory runtime state for status and latest row values
+- Background poller goroutine with ticker and `IsActive()`
+- Modbus TCP request path built only with `github.com/tamzrod/modbus`
 
-### HTTP layer
+## Backend modules
 
-The `state.routes()` router in `main.go` wires handlers for:
+### HTTP API
 
-- basic operations (`/api/read`, `/api/write`, `/api/status`)
-- profile lifecycle (`/api/profile`, `/api/profile/import`, `/api/profile/export`)
-- advanced parsing/scanning (`/api/parse`, `/api/scan`)
-- static web assets (`/` served from `web/`)
+Routes:
 
-### State and synchronization
+- `POST /api/read/bulk`
+- `POST /api/read/single`
+- `POST /api/write/single`
+- `POST /api/polling/start`
+- `POST /api/polling/stop`
+- `GET /api/status`
 
-The `state` struct is the central runtime store:
+### Runtime state
 
-- `client`: Modbus backend through `mbClient` interface
-- `cache`: last read registers per address
-- `prof` and `profRaw`: parsed and raw YAML profile
-- `lastPollTime` and `lastErr`: connection/status tracking
+`appState` stores:
 
-A `sync.RWMutex` protects shared mutable data accessed by concurrent requests.
+- Modbus requester dependency
+- last read timestamp
+- last error / connection status
+- latest table rows by address
+- poller instance
 
-### Modbus abstraction
+### Poller
 
-The `mbClient` interface isolates transport calls.
+`poller` manages lifecycle and interval polling:
 
-- `goburrowClient` is the production adapter.
-- `simClient` is fallback behavior when live Modbus connection fails.
+- `Start(...)` spawns ticker goroutine
+- `Stop()` terminates it cleanly
+- `IsActive()` reports write lock state
 
-This separation also enables deterministic unit tests with a mock client.
+Write requests are rejected while polling is active.
 
-### Profile model and parsing
+### Modbus transport/protocol
 
-Imported YAML profiles are unmarshaled into `profile` and `registerDef`.
+`tcpRequester`:
 
-`parseByType` interprets cached register values using profile metadata:
+- opens TCP connection per request with configured timeout
+- encodes request with `protocol.Request`
+- sends with `transport/tcp.Client`
+- decodes response with `protocol.DecodeTCP`
 
-- numeric/default register values (with scaling)
-- `float32` with configurable byte order
-- `bits` into named boolean flags
-- `enum` into mapped labels
+No retries are used.
 
-### Web UI
+## Frontend behavior
 
-`web/index.html` provides a minimal client-side app that:
+The web app includes:
 
-- toggles Basic/Advanced views
-- calls API endpoints via `fetch`
-- renders responses in JSON/text panels
+- Config panel
+- Polling controls
+- Output table with per-row READ/WRITE actions
+- Status bar
 
-## Request Flow (high level)
+Rules enforced:
 
-1. Browser action or API call hits handler.
-2. Handler validates input.
-3. Handler reads/writes through `mbClient`.
-4. Results update in-memory cache/status/profile state as needed.
-5. Response is returned as JSON (or YAML/profile download for profile endpoints).
-
-## Testing Strategy
-
-`main_test.go` uses `httptest` plus a `mockClient` to validate:
-
-- basic read/write/status behavior
-- profile import/export/parse/scan behavior
-- register parsing rules in `parseByType`
+- per-row READ always enabled (including during polling)
+- WRITE shown only for FC01/FC03
+- WRITE blocked during polling
+- FC02/FC04 rows are read-only
+- edited values highlight until written
+- exception codes are displayed per row

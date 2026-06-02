@@ -12,54 +12,55 @@ Server binds to `localhost:8080` by default. Override with `BIND_ADDR`, for exam
 BIND_ADDR=127.0.0.1:9090 go run .
 ```
 
-### Docker Compose
+## Open the web UI
 
-```bash
-docker compose up --build
-```
+1. Start ModProbe with `go run .`.
+2. Open `http://localhost:8080`.
+3. Configure connection and range in the **Config Panel**.
 
-This starts ModProbe on `http://localhost:8080`.
+![ModProbe basic mode UI](https://github.com/user-attachments/assets/412b1272-15e4-4fe9-a77b-92763d06e29b)
 
-## How-to
+## Basic mode workflow
 
-### Open the web UI
-
-1. Start ModProbe with `go run .` (or Docker Compose).
-2. Open `http://localhost:8080` in your browser.
-
-![ModProbe web UI](https://github.com/user-attachments/assets/2cc8d5af-0c38-4cda-a969-eb78a9acdb2b)
-
-### Basic mode
-
-1. Leave **Mode** set to **Basic**.
-2. Use **Read** with:
-   - **Address**: register address
-   - **Quantity**: number of registers
-3. Use **Write** with:
-   - **Address**: register address
-   - **Comma-separated values**: values to write
-4. Click **Refresh Status** to check connectivity and current mode.
-
-### Advanced mode
-
-1. Switch **Mode** to **Advanced**.
-2. Import a YAML profile with **Import Profile**.
-3. Use **Parse Cached** to decode values using the imported profile.
-4. Use **Scan** to scan an address range.
-5. Use **Get Profile** or **Export Profile** as needed.
+1. Set **IP:Port**, **Unit ID**, **Timeout ms**, **Function Code**, **Start Address**, and **Quantity**.
+2. Click **READ ALL** to read the full range.
+3. Use per-row **READ** for a single-address refresh.
+4. For FC 01 and FC 03, edit **Value (Dec)** then click per-row **WRITE**.
+5. Enable **Poll Enable** to start backend polling. While polling is active:
+   - table edits are read-only
+   - WRITE is disabled
+   - per-row READ remains available
 
 ## API
 
-Basic mode:
-
-- `GET /api/read/{address}?quantity=1`
-- `POST /api/write/{address}` with JSON `{"values":[1,2]}`
+- `POST /api/read/bulk`
+- `POST /api/read/single`
+- `POST /api/write/single`
+- `POST /api/polling/start`
+- `POST /api/polling/stop`
 - `GET /api/status`
 
-Advanced mode (requires imported profile):
+### Common payload config
 
-- `GET /api/parse/{address}`
-- `GET /api/profile`
-- `POST /api/profile/import` (YAML upload)
-- `GET /api/profile/export`
-- `GET /api/scan/{start}-{end}`
+```json
+{
+  "config": {
+    "target": "127.0.0.1:502",
+    "unit_id": 1,
+    "timeout_ms": 500,
+    "function_code": 3,
+    "start_address": 40001,
+    "quantity": 10
+  }
+}
+```
+
+- `/api/read/single` adds `address`
+- `/api/write/single` adds `address` and `value`
+- `/api/polling/start` adds `interval_ms`
+
+## Notes
+
+- Only `github.com/tamzrod/modbus` is used for Modbus transport/protocol.
+- No retry logic is implemented.
+- Modbus exception codes are preserved in table responses.

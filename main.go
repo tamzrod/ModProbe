@@ -1,523 +1,652 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"math"
-	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/goburrow/modbus"
-	"gopkg.in/yaml.v3"
+	modbusprotocol "github.com/tamzrod/modbus/protocol"
+	tcptransport "github.com/tamzrod/modbus/transport/tcp"
 )
 
-type registerDef struct {
-	Address   int            `yaml:"address" json:"address"`
-	Name      string         `yaml:"name" json:"name"`
-	Type      string         `yaml:"type" json:"type"`
-	ByteOrder string         `yaml:"byte_order" json:"byte_order,omitempty"`
-	Scale     float64        `yaml:"scale" json:"scale,omitempty"`
-	Unit      string         `yaml:"unit" json:"unit,omitempty"`
-	Bits      map[int]string `yaml:"bits" json:"bits,omitempty"`
-	Mapping   map[int]string `yaml:"mapping" json:"mapping,omitempty"`
+const (
+	defaultBindAddr      = "localhost:8080"
+	defaultTarget        = "127.0.0.1:502"
+	defaultUnitID        = 1
+	defaultTimeoutMS     = 500
+	defaultFunctionCode  = 3
+	defaultStartAddress  = 40001
+	defaultQuantity      = 10
+	defaultPollingMS     = 1000
+	maxTimeoutMS         = 60000
+	maxPollIntervalMS    = 60000
+	maxRegisterReadCount = 125
+	maxBitReadCount      = 2000
+	maxRequestBodySize   = 1 << 20
+	maxStoredErrorLength = 1000
+)
+
+var errPollingActive = errors.New("writes are disabled while polling is active")
+
+type connectionConfig struct {
+	Target       string `json:"target"`
+	UnitID       int    `json:"unit_id"`
+	TimeoutMS    int    `json:"timeout_ms"`
+	FunctionCode int    `json:"function_code"`
+	StartAddress int    `json:"start_address"`
+	Quantity     int    `json:"quantity"`
 }
 
-type profile struct {
-	Device struct {
-		Name       string `yaml:"name" json:"name"`
-		Connection string `yaml:"connection" json:"connection"`
-		Timeout    string `yaml:"timeout" json:"timeout"`
-		Protocol   string `yaml:"protocol" json:"protocol"`
-	} `yaml:"device" json:"device"`
-	Registers []registerDef `yaml:"registers" json:"registers"`
+type rowResult struct {
+	Address   int    `json:"address"`
+	ValueHex  string `json:"value_hex"`
+	ValueDec  int    `json:"value_dec"`
+	Exception string `json:"exception"`
+	Timestamp string `json:"timestamp"`
 }
 
-type mbClient interface {
-	ReadHoldingRegisters(address, quantity uint16) ([]byte, error)
-	WriteSingleRegister(address, value uint16) ([]byte, error)
-	WriteMultipleRegisters(address, quantity uint16, value []byte) ([]byte, error)
+type bulkReadRequest struct {
+	Config connectionConfig `json:"config"`
 }
 
-type goburrowClient struct {
-	client modbus.Client
+type singleReadRequest struct {
+	Config  connectionConfig `json:"config"`
+	Address int              `json:"address"`
 }
 
-func (g *goburrowClient) ReadHoldingRegisters(address, quantity uint16) ([]byte, error) {
-	return g.client.ReadHoldingRegisters(address, quantity)
+type writeRequest struct {
+	Config  connectionConfig `json:"config"`
+	Address int              `json:"address"`
+	Value   int              `json:"value"`
 }
 
-func (g *goburrowClient) WriteSingleRegister(address, value uint16) ([]byte, error) {
-	return g.client.WriteSingleRegister(address, value)
+type pollingStartRequest struct {
+	Config     connectionConfig `json:"config"`
+	IntervalMS int              `json:"interval_ms"`
 }
 
-func (g *goburrowClient) WriteMultipleRegisters(address, quantity uint16, value []byte) ([]byte, error) {
-	return g.client.WriteMultipleRegisters(address, quantity, value)
+type modbusRequester interface {
+	Do(cfg normalizedConfig, function uint8, payload []byte) (*modbusprotocol.Response, error)
 }
 
-type state struct {
+type tcpRequester struct {
+	tid atomic.Uint32
+}
+
+type normalizedConfig struct {
+	Target       string
+	UnitID       uint8
+	Timeout      time.Duration
+	FunctionCode uint8
+	StartAddress int
+	Quantity     int
+}
+
+type appState struct {
 	mu           sync.RWMutex
-	client       mbClient
-	lastPollTime *time.Time
-	lastErr      string
-	cache        map[int][]uint16
-	prof         *profile
-	profRaw      []byte
+	requester    modbusRequester
+	lastReadTime *time.Time
+	lastError    string
+	rows         map[int]rowResult
+	poller       *poller
 }
 
-// maxProfileSize bounds profile uploads to prevent excessive memory use.
-const maxProfileSize int64 = 2 * 1024 * 1024
-const defaultModbusAddr = "127.0.0.1:502"
-const defaultBindAddr = "localhost:8080"
-const defaultModbusTimeout = 500 * time.Millisecond
-
-func newState(client mbClient) *state {
-	return &state{client: client, cache: map[int][]uint16{}}
+type poller struct {
+	mu         sync.RWMutex
+	active     bool
+	intervalMS int
+	cfg        normalizedConfig
+	stopCh     chan struct{}
+	doneCh     chan struct{}
 }
 
-func (s *state) setPoll(err error) {
-	n := time.Now().UTC()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastPollTime = &n
+func newApp(requester modbusRequester) *appState {
+	a := &appState{
+		requester: requester,
+		rows:      map[int]rowResult{},
+	}
+	a.poller = &poller{}
+	return a
+}
+
+func normalizeConfig(cfg connectionConfig) (normalizedConfig, error) {
+	if cfg.Target == "" {
+		cfg.Target = defaultTarget
+	}
+	if cfg.UnitID == 0 {
+		cfg.UnitID = defaultUnitID
+	}
+	if cfg.TimeoutMS == 0 {
+		cfg.TimeoutMS = defaultTimeoutMS
+	}
+	if cfg.FunctionCode == 0 {
+		cfg.FunctionCode = defaultFunctionCode
+	}
+	if cfg.StartAddress == 0 {
+		cfg.StartAddress = defaultStartAddress
+	}
+	if cfg.Quantity == 0 {
+		cfg.Quantity = defaultQuantity
+	}
+	if cfg.UnitID < 0 || cfg.UnitID > math.MaxUint8 {
+		return normalizedConfig{}, errors.New("unit_id out of range")
+	}
+	if cfg.TimeoutMS < 1 || cfg.TimeoutMS > maxTimeoutMS {
+		return normalizedConfig{}, errors.New("timeout_ms out of range")
+	}
+	if cfg.StartAddress < 1 || cfg.StartAddress > math.MaxUint16+1 {
+		return normalizedConfig{}, errors.New("start_address out of range")
+	}
+	if cfg.Quantity < 1 {
+		return normalizedConfig{}, errors.New("quantity must be at least 1")
+	}
+	if cfg.FunctionCode != 1 && cfg.FunctionCode != 2 && cfg.FunctionCode != 3 && cfg.FunctionCode != 4 {
+		return normalizedConfig{}, errors.New("unsupported function_code")
+	}
+	if (cfg.FunctionCode == 1 || cfg.FunctionCode == 2) && cfg.Quantity > maxBitReadCount {
+		return normalizedConfig{}, fmt.Errorf("quantity exceeds max %d for bit reads", maxBitReadCount)
+	}
+	if (cfg.FunctionCode == 3 || cfg.FunctionCode == 4) && cfg.Quantity > maxRegisterReadCount {
+		return normalizedConfig{}, fmt.Errorf("quantity exceeds max %d for register reads", maxRegisterReadCount)
+	}
+	if _, err := humanAddressToDevice(cfg.StartAddress); err != nil {
+		return normalizedConfig{}, err
+	}
+	if cfg.StartAddress+cfg.Quantity-1 > math.MaxUint16+1 {
+		return normalizedConfig{}, errors.New("address range out of bounds")
+	}
+
+	return normalizedConfig{
+		Target:       cfg.Target,
+		UnitID:       uint8(cfg.UnitID),
+		Timeout:      time.Duration(cfg.TimeoutMS) * time.Millisecond,
+		FunctionCode: uint8(cfg.FunctionCode),
+		StartAddress: cfg.StartAddress,
+		Quantity:     cfg.Quantity,
+	}, nil
+}
+
+func humanAddressToDevice(address int) (uint16, error) {
+	if address < 1 || address > math.MaxUint16+1 {
+		return 0, errors.New("address out of range")
+	}
+	return uint16(address - 1), nil
+}
+
+func buildReadPayload(startAddr, qty uint16) []byte {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint16(payload[0:2], startAddr)
+	binary.BigEndian.PutUint16(payload[2:4], qty)
+	return payload
+}
+
+func (r *tcpRequester) Do(cfg normalizedConfig, function uint8, payload []byte) (*modbusprotocol.Response, error) {
+	conn, err := net.DialTimeout("tcp", cfg.Target, cfg.Timeout)
 	if err != nil {
-		s.lastErr = err.Error()
+		return nil, err
+	}
+	defer conn.Close()
+
+	tcpClient := &tcptransport.Client{Conn: conn, Timeout: cfg.Timeout}
+	req := &modbusprotocol.Request{
+		TransactionID: uint16(r.tid.Add(1)),
+		ProtocolID:    0,
+		UnitID:        cfg.UnitID,
+		Function:      modbusprotocol.FunctionCode(function),
+		Payload:       payload,
+	}
+	rawReq := req.EncodeTCP()
+	rawResp, err := tcpClient.Send(rawReq)
+	if err != nil {
+		return nil, err
+	}
+	return modbusprotocol.DecodeTCP(rawResp)
+}
+
+func (a *appState) setReadOutcome(err error) {
+	now := time.Now().UTC()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.lastReadTime = &now
+	if err != nil {
+		msg := err.Error()
+		if len(msg) > maxStoredErrorLength {
+			msg = msg[:maxStoredErrorLength]
+		}
+		a.lastError = msg
 		return
 	}
-	s.lastErr = ""
+	a.lastError = ""
 }
 
-func (s *state) routes() http.Handler {
+func (a *appState) mergeRows(rows []rowResult) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, row := range rows {
+		a.rows[row.Address] = row
+	}
+}
+
+func (a *appState) replaceRows(rows []rowResult) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.rows = make(map[int]rowResult, len(rows))
+	for _, row := range rows {
+		a.rows[row.Address] = row
+	}
+}
+
+func (a *appState) snapshotRows() []rowResult {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	rows := make([]rowResult, 0, len(a.rows))
+	for _, row := range a.rows {
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Address < rows[j].Address })
+	return rows
+}
+
+func (a *appState) readRange(cfg normalizedConfig, startAddress, quantity int) ([]rowResult, error) {
+	if quantity < 1 || quantity > maxQuantityForFunction(cfg.FunctionCode) {
+		return nil, errors.New("invalid quantity for function code")
+	}
+	startDevice, err := humanAddressToDevice(startAddress)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.requester.Do(cfg, cfg.FunctionCode, buildReadPayload(startDevice, uint16(quantity)))
+	if err != nil {
+		a.setReadOutcome(err)
+		return nil, err
+	}
+
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	rows := make([]rowResult, 0, quantity)
+	if resp.Exception != nil {
+		exCode := fmt.Sprintf("0x%02X", uint8(*resp.Exception))
+		for i := 0; i < quantity; i++ {
+			rows = append(rows, rowResult{
+				Address:   startAddress + i,
+				Exception: exCode,
+				Timestamp: timestamp,
+			})
+		}
+		a.setReadOutcome(nil)
+		return rows, nil
+	}
+
+	decoded, err := decodeReadPayload(cfg.FunctionCode, resp.Payload, quantity)
+	if err != nil {
+		a.setReadOutcome(err)
+		return nil, err
+	}
+	for i, value := range decoded {
+		rows = append(rows, rowResult{
+			Address:   startAddress + i,
+			ValueHex:  fmt.Sprintf("0x%04X", value),
+			ValueDec:  int(value),
+			Timestamp: timestamp,
+		})
+	}
+	a.setReadOutcome(nil)
+	return rows, nil
+}
+
+func decodeReadPayload(functionCode uint8, payload []byte, quantity int) ([]uint16, error) {
+	if quantity < 1 || quantity > maxQuantityForFunction(functionCode) {
+		return nil, errors.New("invalid quantity for function code")
+	}
+	if len(payload) < 1 {
+		return nil, errors.New("malformed payload")
+	}
+	byteCount := int(payload[0])
+	if len(payload[1:]) < byteCount {
+		return nil, errors.New("short payload")
+	}
+
+	data := payload[1 : 1+byteCount]
+	values := make([]uint16, 0, quantity)
+
+	switch functionCode {
+	case 1, 2:
+		for i := 0; i < quantity; i++ {
+			byteIdx := i / 8
+			bitIdx := uint(i % 8)
+			if byteIdx >= len(data) {
+				return nil, errors.New("bit payload too short")
+			}
+			if data[byteIdx]&(1<<bitIdx) != 0 {
+				values = append(values, 1)
+			} else {
+				values = append(values, 0)
+			}
+		}
+	case 3, 4:
+		expectedBytes := quantity * 2
+		if len(data) < expectedBytes {
+			return nil, errors.New("register payload too short")
+		}
+		for i := 0; i < quantity; i++ {
+			start := i * 2
+			values = append(values, binary.BigEndian.Uint16(data[start:start+2]))
+		}
+	default:
+		return nil, errors.New("unsupported function code")
+	}
+	return values, nil
+}
+
+func maxQuantityForFunction(functionCode uint8) int {
+	if functionCode == 1 || functionCode == 2 {
+		return maxBitReadCount
+	}
+	return maxRegisterReadCount
+}
+
+func (a *appState) readSingle(cfg normalizedConfig, address int) (rowResult, error) {
+	rows, err := a.readRange(cfg, address, 1)
+	if err != nil {
+		return rowResult{}, err
+	}
+	if len(rows) != 1 {
+		return rowResult{}, errors.New("single read returned unexpected row count")
+	}
+	a.mergeRows(rows)
+	return rows[0], nil
+}
+
+func (a *appState) writeSingle(cfg normalizedConfig, address int, value int) (rowResult, error) {
+	if a.poller.IsActive() {
+		return rowResult{}, errPollingActive
+	}
+	if cfg.FunctionCode != 1 && cfg.FunctionCode != 3 {
+		return rowResult{}, errors.New("write is only allowed for function codes 01 and 03")
+	}
+	if _, err := humanAddressToDevice(address); err != nil {
+		return rowResult{}, err
+	}
+	if value < 0 || value > math.MaxUint16 {
+		return rowResult{}, errors.New("write value out of range")
+	}
+
+	deviceAddr, _ := humanAddressToDevice(address)
+	var payload []byte
+	var function uint8
+	if cfg.FunctionCode == 1 {
+		function = 5
+		payload = make([]byte, 4)
+		binary.BigEndian.PutUint16(payload[0:2], deviceAddr)
+		if value != 0 {
+			binary.BigEndian.PutUint16(payload[2:4], 0xFF00)
+		} else {
+			binary.BigEndian.PutUint16(payload[2:4], 0x0000)
+		}
+	} else {
+		function = 6
+		payload = make([]byte, 4)
+		binary.BigEndian.PutUint16(payload[0:2], deviceAddr)
+		binary.BigEndian.PutUint16(payload[2:4], uint16(value))
+	}
+
+	resp, err := a.requester.Do(cfg, function, payload)
+	a.setReadOutcome(err)
+	if err != nil {
+		return rowResult{}, err
+	}
+	if resp.Exception != nil {
+		return rowResult{}, fmt.Errorf("modbus exception 0x%02X", uint8(*resp.Exception))
+	}
+	row, err := a.readSingle(cfg, address)
+	if err != nil {
+		return rowResult{}, err
+	}
+	return row, nil
+}
+
+func (p *poller) IsActive() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.active
+}
+
+func (p *poller) Snapshot() (bool, int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.active, p.intervalMS
+}
+
+func (p *poller) Start(owner *appState, cfg normalizedConfig, intervalMS int) error {
+	if intervalMS < 1 || intervalMS > maxPollIntervalMS {
+		return fmt.Errorf("interval_ms must be between 1 and %d", maxPollIntervalMS)
+	}
+	p.Stop()
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	p.mu.Lock()
+	p.active = true
+	p.intervalMS = intervalMS
+	p.cfg = cfg
+	p.stopCh = stop
+	p.doneCh = done
+	p.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		runOnce := func() {
+			rows, err := owner.readRange(cfg, cfg.StartAddress, cfg.Quantity)
+			if err != nil {
+				return
+			}
+			owner.replaceRows(rows)
+		}
+		runOnce()
+		ticker := time.NewTicker(time.Duration(intervalMS) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				runOnce()
+			case <-stop:
+				return
+			}
+		}
+	}()
+	return nil
+}
+
+func (p *poller) Stop() {
+	p.mu.Lock()
+	if !p.active {
+		p.mu.Unlock()
+		return
+	}
+	stop := p.stopCh
+	done := p.doneCh
+	p.active = false
+	p.intervalMS = 0
+	p.stopCh = nil
+	p.doneCh = nil
+	p.mu.Unlock()
+
+	close(stop)
+	<-done
+}
+
+func jsonWrite(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) bool {
+	defer r.Body.Close()
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBodySize))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); err == nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "payload must contain a single JSON object"})
+		return false
+	}
+	return true
+}
+
+func methodGuard(w http.ResponseWriter, r *http.Request, method string) bool {
+	if r.Method == method {
+		return true
+	}
+	jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	return false
+}
+
+func (a *appState) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/read/", s.handleRead)
-	mux.HandleFunc("/api/write/", s.handleWrite)
-	mux.HandleFunc("/api/status", s.handleStatus)
-	mux.HandleFunc("/api/parse/", s.handleParse)
-	mux.HandleFunc("/api/profile", s.handleProfile)
-	mux.HandleFunc("/api/profile/import", s.handleImportProfile)
-	mux.HandleFunc("/api/profile/export", s.handleExportProfile)
-	mux.HandleFunc("/api/scan/", s.handleScan)
+	mux.HandleFunc("/api/read/bulk", a.handleBulkRead)
+	mux.HandleFunc("/api/read/single", a.handleSingleRead)
+	mux.HandleFunc("/api/write/single", a.handleWriteSingle)
+	mux.HandleFunc("/api/polling/start", a.handlePollingStart)
+	mux.HandleFunc("/api/polling/stop", a.handlePollingStop)
+	mux.HandleFunc("/api/status", a.handleStatus)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return mux
 }
 
-func parseAddress(path, prefix string) (int, error) {
-	raw := strings.TrimPrefix(path, prefix)
-	if raw == "" || strings.Contains(raw, "/") {
-		return 0, errors.New("invalid address")
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, errors.New("address must be integer")
-	}
-	if v < 0 || v > math.MaxUint16 {
-		return 0, errors.New("address out of range")
-	}
-	return v, nil
-}
-
-func toUint16(v int) (uint16, error) {
-	if v < 0 || v > math.MaxUint16 {
-		return 0, errors.New("value out of range")
-	}
-	return uint16(v), nil
-}
-
-func decodeRegisters(data []byte) []uint16 {
-	regs := make([]uint16, 0, len(data)/2)
-	for i := 0; i+1 < len(data); i += 2 {
-		regs = append(regs, binary.BigEndian.Uint16(data[i:i+2]))
-	}
-	return regs
-}
-
-func jsonWrite(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func (s *state) handleRead(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+func (a *appState) handleBulkRead(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodPost) {
 		return
 	}
-	addr, err := parseAddress(r.URL.Path, "/api/read/")
+	var req bulkReadRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	qty := 1
-	if q := r.URL.Query().Get("quantity"); q != "" {
-		qty, err = strconv.Atoi(q)
-		if err != nil || qty < 1 || qty > math.MaxUint16 {
-			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid quantity"})
-			return
-		}
-	}
-
-	addr16, err := toUint16(addr)
-	if err != nil {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	qty16, err := toUint16(qty)
-	if err != nil {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid quantity"})
-		return
-	}
-	b, err := s.client.ReadHoldingRegisters(addr16, qty16)
-	s.setPoll(err)
+	rows, err := a.readRange(cfg, cfg.StartAddress, cfg.Quantity)
 	if err != nil {
 		jsonWrite(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	regs := decodeRegisters(b)
-
-	s.mu.Lock()
-	s.cache[addr] = regs
-	s.mu.Unlock()
-
-	jsonWrite(w, http.StatusOK, map[string]any{"address": addr, "quantity": qty, "registers": regs})
+	a.replaceRows(rows)
+	jsonWrite(w, http.StatusOK, map[string]any{"rows": rows})
 }
 
-func (s *state) handleWrite(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+func (a *appState) handleSingleRead(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodPost) {
 		return
 	}
-	addr, err := parseAddress(r.URL.Path, "/api/write/")
+	var req singleReadRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-
-	var payload struct {
-		Values []uint16 `json:"values"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON payload"})
-		return
-	}
-	if len(payload.Values) == 0 {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "values array cannot be empty"})
-		return
-	}
-
-	if len(payload.Values) == 1 {
-		addr16, convErr := toUint16(addr)
-		if convErr != nil {
-			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": convErr.Error()})
-			return
-		}
-		_, err = s.client.WriteSingleRegister(addr16, payload.Values[0])
-	} else {
-		buf := bytes.NewBuffer(nil)
-		for _, v := range payload.Values {
-			if e := binary.Write(buf, binary.BigEndian, v); e != nil {
-				jsonWrite(w, http.StatusInternalServerError, map[string]string{"error": e.Error()})
-				return
-			}
-		}
-		addr16, convErr := toUint16(addr)
-		if convErr != nil {
-			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": convErr.Error()})
-			return
-		}
-		qty16, convErr := toUint16(len(payload.Values))
-		if convErr != nil {
-			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "too many values"})
-			return
-		}
-		_, err = s.client.WriteMultipleRegisters(addr16, qty16, buf.Bytes())
-	}
-
-	s.setPoll(err)
+	row, err := a.readSingle(cfg, req.Address)
 	if err != nil {
 		jsonWrite(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	jsonWrite(w, http.StatusOK, map[string]any{"address": addr, "written": payload.Values})
+	jsonWrite(w, http.StatusOK, map[string]any{"row": row})
 }
 
-func (s *state) handleStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+func (a *appState) handleWriteSingle(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodPost) {
 		return
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	resp := map[string]any{"connected": s.lastErr == "", "last_error": s.lastErr}
-	if s.lastPollTime != nil {
-		resp["last_poll_time"] = s.lastPollTime.Format(time.RFC3339Nano)
-	}
-	jsonWrite(w, http.StatusOK, resp)
-}
-
-func (s *state) requireProfile() (*profile, []byte, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.prof == nil {
-		return nil, nil, false
-	}
-	return s.prof, bytes.Clone(s.profRaw), true
-}
-
-func (s *state) handleProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+	var req writeRequest
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	_, raw, ok := s.requireProfile()
-	if !ok {
-		jsonWrite(w, http.StatusNotFound, map[string]string{"error": "profile not loaded"})
-		return
-	}
-	w.Header().Set("Content-Type", "application/x-yaml")
-	_, _ = w.Write(raw)
-}
-
-func readProfileUpload(r *http.Request) ([]byte, error) {
-	if strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
-		if err := r.ParseMultipartForm(maxProfileSize); err != nil {
-			return nil, err
-		}
-		for _, files := range r.MultipartForm.File {
-			if len(files) > 0 {
-				return readMultipartFile(files[0])
-			}
-		}
-		return nil, errors.New("no file uploaded")
-	}
-	raw, err := io.ReadAll(io.LimitReader(r.Body, maxProfileSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(raw)) > maxProfileSize {
-		return nil, errors.New("payload too large")
-	}
-	return raw, nil
-}
-
-func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
-	f, err := fh.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, maxProfileSize))
-}
-
-func (s *state) handleImportProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	raw, err := readProfileUpload(r)
+	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-
-	var p profile
-	if err := yaml.Unmarshal(raw, &p); err != nil {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid profile yaml"})
+	row, err := a.writeSingle(cfg, req.Address, req.Value)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errPollingActive) {
+			status = http.StatusConflict
+		}
+		jsonWrite(w, status, map[string]string{"error": err.Error()})
 		return
 	}
-
-	s.mu.Lock()
-	s.prof = &p
-	s.profRaw = bytes.Clone(raw)
-	s.mu.Unlock()
-
-	jsonWrite(w, http.StatusOK, map[string]any{"status": "imported", "register_count": len(p.Registers)})
+	jsonWrite(w, http.StatusOK, map[string]any{"row": row})
 }
 
-func (s *state) handleExportProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+func (a *appState) handlePollingStart(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodPost) {
 		return
 	}
-	_, raw, ok := s.requireProfile()
-	if !ok {
-		jsonWrite(w, http.StatusNotFound, map[string]string{"error": "profile not loaded"})
+	var req pollingStartRequest
+	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	w.Header().Set("Content-Type", "application/x-yaml")
-	w.Header().Set("Content-Disposition", `attachment; filename="profile.yaml"`)
-	_, _ = w.Write(raw)
-}
-
-func (s *state) handleParse(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
-		return
-	}
-	addr, err := parseAddress(r.URL.Path, "/api/parse/")
+	cfg, err := normalizeConfig(req.Config)
 	if err != nil {
 		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	p, _, ok := s.requireProfile()
-	if !ok {
-		jsonWrite(w, http.StatusPreconditionFailed, map[string]string{"error": "profile required"})
+	if req.IntervalMS == 0 {
+		req.IntervalMS = defaultPollingMS
+	}
+	if err := a.poller.Start(a, cfg, req.IntervalMS); err != nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-
-	s.mu.RLock()
-	regs, ok := s.cache[addr]
-	s.mu.RUnlock()
-	if !ok {
-		jsonWrite(w, http.StatusNotFound, map[string]string{"error": "no cached response for address"})
-		return
-	}
-
-	for _, reg := range p.Registers {
-		if reg.Address != addr {
-			continue
-		}
-		parsed, perr := parseByType(reg, regs)
-		if perr != nil {
-			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": perr.Error()})
-			return
-		}
-		jsonWrite(w, http.StatusOK, map[string]any{"address": addr, "name": reg.Name, "type": reg.Type, "value": parsed, "unit": reg.Unit})
-		return
-	}
-	jsonWrite(w, http.StatusNotFound, map[string]string{"error": "address not found in profile"})
+	jsonWrite(w, http.StatusOK, map[string]any{"polling_active": true, "interval_ms": req.IntervalMS})
 }
 
-func parseByType(reg registerDef, regs []uint16) (any, error) {
-	scale := reg.Scale
-	if scale == 0 {
-		scale = 1
-	}
-
-	switch strings.ToLower(reg.Type) {
-	case "float32":
-		if len(regs) < 2 {
-			return nil, errors.New("float32 requires two registers")
-		}
-		w1, w2 := regs[0], regs[1]
-		if strings.EqualFold(reg.ByteOrder, "little") {
-			w1, w2 = w2, w1
-		}
-		b := make([]byte, 4)
-		binary.BigEndian.PutUint16(b[0:2], w1)
-		binary.BigEndian.PutUint16(b[2:4], w2)
-		f := math.Float32frombits(binary.BigEndian.Uint32(b))
-		return float64(f) * scale, nil
-	case "bits":
-		if len(regs) == 0 {
-			return nil, errors.New("bits requires one register")
-		}
-		v := regs[0]
-		out := map[string]bool{}
-		for bit, name := range reg.Bits {
-			out[name] = (v & (1 << bit)) != 0
-		}
-		return out, nil
-	case "enum":
-		if len(regs) == 0 {
-			return nil, errors.New("enum requires one register")
-		}
-		if name, ok := reg.Mapping[int(regs[0])]; ok {
-			return name, nil
-		}
-		return fmt.Sprintf("unknown(%d)", regs[0]), nil
-	default:
-		if len(regs) == 0 {
-			return nil, errors.New("missing register")
-		}
-		return float64(regs[0]) * scale, nil
-	}
-}
-
-func (s *state) handleScan(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		jsonWrite(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+func (a *appState) handlePollingStop(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodPost) {
 		return
 	}
-	p := strings.TrimPrefix(r.URL.Path, "/api/scan/")
-	parts := strings.Split(p, "-")
-	if len(parts) != 2 {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "scan path must be /api/scan/{start}-{end}"})
+	a.poller.Stop()
+	jsonWrite(w, http.StatusOK, map[string]any{"polling_active": false})
+}
+
+func (a *appState) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodGet) {
 		return
 	}
-	start, err1 := strconv.Atoi(parts[0])
-	end, err2 := strconv.Atoi(parts[1])
-	if err1 != nil || err2 != nil || start < 0 || end < start || end > math.MaxUint16 {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "invalid scan range"})
-		return
+	a.mu.RLock()
+	lastErr := a.lastError
+	var lastRead string
+	if a.lastReadTime != nil {
+		lastRead = a.lastReadTime.Format(time.RFC3339Nano)
 	}
-	if _, _, ok := s.requireProfile(); !ok {
-		jsonWrite(w, http.StatusPreconditionFailed, map[string]string{"error": "profile required"})
-		return
-	}
+	a.mu.RUnlock()
 
-	results := make([]map[string]any, 0, end-start+1)
-	for addr := start; addr <= end; addr++ {
-		addr16, convErr := toUint16(addr)
-		if convErr != nil {
-			results = append(results, map[string]any{"address": addr, "ok": false, "error": convErr.Error()})
-			continue
-		}
-		b, err := s.client.ReadHoldingRegisters(addr16, 1)
-		if err != nil {
-			results = append(results, map[string]any{"address": addr, "ok": false, "error": err.Error()})
-			continue
-		}
-		regs := decodeRegisters(b)
-		s.mu.Lock()
-		s.cache[addr] = regs
-		s.mu.Unlock()
-		results = append(results, map[string]any{"address": addr, "ok": true, "registers": regs})
-	}
-	s.setPoll(nil)
-	jsonWrite(w, http.StatusOK, map[string]any{"start": start, "end": end, "results": results})
-}
-
-func newLiveClient() mbClient {
-	modbusAddr := os.Getenv("MODBUS_ADDR")
-	if modbusAddr == "" {
-		modbusAddr = defaultModbusAddr
-	}
-	handler := modbus.NewTCPClientHandler(modbusAddr)
-	handler.Timeout = defaultModbusTimeout
-	if err := handler.Connect(); err != nil {
-		log.Printf("modbus connect failed: %v", err)
-		return &simClient{}
-	}
-	return &goburrowClient{client: modbus.NewClient(handler)}
-}
-
-type simClient struct{}
-
-func (s *simClient) ReadHoldingRegisters(address, quantity uint16) ([]byte, error) {
-	out := make([]byte, int(quantity)*2)
-	for i := 0; i < int(quantity); i++ {
-		binary.BigEndian.PutUint16(out[i*2:i*2+2], address+uint16(i))
-	}
-	return out, nil
-}
-
-func (s *simClient) WriteSingleRegister(address, value uint16) ([]byte, error) {
-	return []byte{0, 0}, nil
-}
-
-func (s *simClient) WriteMultipleRegisters(address, quantity uint16, value []byte) ([]byte, error) {
-	return []byte{0, 0}, nil
+	pollingActive, intervalMS := a.poller.Snapshot()
+	jsonWrite(w, http.StatusOK, map[string]any{
+		"connected":           lastErr == "",
+		"last_error":          lastErr,
+		"last_read_timestamp": lastRead,
+		"polling_active":      pollingActive,
+		"polling_interval_ms": intervalMS,
+		"rows":                a.snapshotRows(),
+	})
 }
 
 func main() {
@@ -526,12 +655,12 @@ func main() {
 		bindAddr = defaultBindAddr
 	}
 
-	st := newState(newLiveClient())
+	app := newApp(&tcpRequester{})
 	if cwd, err := os.Getwd(); err == nil {
 		log.Printf("serving web assets from %s", filepath.Join(cwd, "web"))
 	}
 	log.Printf("ModProbe listening on http://%s", bindAddr)
-	if err := http.ListenAndServe(bindAddr, st.routes()); err != nil {
+	if err := http.ListenAndServe(bindAddr, app.routes()); err != nil {
 		log.Fatal(err)
 	}
 }
