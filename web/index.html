@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ModProbe</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 1rem; max-width: 900px; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+    input, button, select, textarea { padding: 0.4rem; }
+    .panel { border: 1px solid #ddd; border-radius: 6px; padding: 0.8rem; margin-bottom: 1rem; }
+    #advanced { display: none; }
+    pre { background: #f6f8fa; padding: 0.7rem; overflow: auto; }
+  </style>
+</head>
+<body>
+  <h1>ModProbe</h1>
+
+  <div class="panel">
+    <div class="row">
+      <label for="mode">Mode</label>
+      <select id="mode">
+        <option value="basic">Basic</option>
+        <option value="advanced">Advanced</option>
+      </select>
+      <button id="statusBtn" type="button">Refresh Status</button>
+    </div>
+    <pre id="statusOut"></pre>
+  </div>
+
+  <div class="panel" id="basic">
+    <h2>Basic</h2>
+    <div class="row">
+      <input id="readAddr" type="number" placeholder="Address" />
+      <input id="readQty" type="number" placeholder="Quantity" value="1" min="1" />
+      <button id="readBtn" type="button">Read</button>
+    </div>
+    <div class="row">
+      <input id="writeAddr" type="number" placeholder="Address" />
+      <input id="writeVals" type="text" placeholder="Comma-separated values" />
+      <button id="writeBtn" type="button">Write</button>
+    </div>
+    <pre id="basicOut"></pre>
+  </div>
+
+  <div class="panel" id="advanced">
+    <h2>Advanced</h2>
+    <div class="row">
+      <input id="parseAddr" type="number" placeholder="Parse Address" />
+      <button id="parseBtn" type="button">Parse Cached</button>
+    </div>
+    <div class="row">
+      <input id="scanStart" type="number" placeholder="Scan Start" />
+      <input id="scanEnd" type="number" placeholder="Scan End" />
+      <button id="scanBtn" type="button">Scan</button>
+    </div>
+    <div class="row">
+      <input id="profileFile" type="file" accept=".yaml,.yml,text/yaml,application/x-yaml" />
+      <button id="importBtn" type="button">Import Profile</button>
+      <button id="getProfileBtn" type="button">Get Profile</button>
+      <button id="exportProfileBtn" type="button">Export Profile</button>
+    </div>
+    <pre id="advancedOut"></pre>
+  </div>
+
+<script>
+const mode = document.getElementById('mode');
+const advancedPanel = document.getElementById('advanced');
+mode.addEventListener('change', () => {
+  advancedPanel.style.display = mode.value === 'advanced' ? 'block' : 'none';
+});
+
+function show(id, data) {
+  document.getElementById(id).textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+}
+
+async function apiFetch(url, opts={}) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  try {
+    return { ok: res.ok, status: res.status, data: JSON.parse(text) };
+  } catch {
+    return { ok: res.ok, status: res.status, data: text };
+  }
+}
+
+document.getElementById('statusBtn').onclick = async () => show('statusOut', await apiFetch('/api/status'));
+document.getElementById('readBtn').onclick = async () => {
+  const addr = document.getElementById('readAddr').value;
+  const qty = document.getElementById('readQty').value || '1';
+  show('basicOut', await apiFetch(`/api/read/${addr}?quantity=${qty}`));
+};
+document.getElementById('writeBtn').onclick = async () => {
+  const addr = document.getElementById('writeAddr').value;
+  const values = document.getElementById('writeVals').value.split(',').map(rawValue => Number(rawValue.trim())).filter(numericValue => !Number.isNaN(numericValue));
+  show('basicOut', await apiFetch(`/api/write/${addr}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ values })
+  }));
+};
+document.getElementById('parseBtn').onclick = async () => {
+  const addr = document.getElementById('parseAddr').value;
+  show('advancedOut', await apiFetch(`/api/parse/${addr}`));
+};
+document.getElementById('scanBtn').onclick = async () => {
+  const scanStart = document.getElementById('scanStart').value;
+  const scanEnd = document.getElementById('scanEnd').value;
+  show('advancedOut', await apiFetch(`/api/scan/${scanStart}-${scanEnd}`));
+};
+document.getElementById('importBtn').onclick = async () => {
+  const selectedFile = document.getElementById('profileFile').files[0];
+  if (!selectedFile) return show('advancedOut', 'Select a YAML file first');
+  const form = new FormData();
+  form.append('file', selectedFile);
+  show('advancedOut', await apiFetch('/api/profile/import', { method: 'POST', body: form }));
+};
+document.getElementById('getProfileBtn').onclick = async () => show('advancedOut', await apiFetch('/api/profile'));
+document.getElementById('exportProfileBtn').onclick = async () => {
+  const res = await fetch('/api/profile/export');
+  const txt = await res.text();
+  show('advancedOut', txt);
+};
+</script>
+</body>
+</html>
