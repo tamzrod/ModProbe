@@ -18,7 +18,7 @@ BIND_ADDR=127.0.0.1:9090 go run .
 2. Open `http://localhost:8080`.
 3. Configure connection and range in the **Config Panel**.
 
-![ModProbe basic mode UI](./images/modprobe-basic-mode.png)
+![ModProbe basic mode UI](https://github.com/user-attachments/assets/412b1272-15e4-4fe9-a77b-92763d06e29b)
 
 ## Basic mode workflow
 
