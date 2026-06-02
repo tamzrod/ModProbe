@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,7 +34,10 @@ const (
 	maxRegisterReadCount = 125
 	maxBitReadCount      = 2000
 	maxRequestBodySize   = 1 << 20
+	maxStoredErrorLength = 1000
 )
+
+var errPollingActive = errors.New("writes are disabled while polling is active")
 
 type connectionConfig struct {
 	Target       string `json:"target"`
@@ -218,7 +220,11 @@ func (a *appState) setReadOutcome(err error) {
 	defer a.mu.Unlock()
 	a.lastReadTime = &now
 	if err != nil {
-		a.lastError = err.Error()
+		msg := err.Error()
+		if len(msg) > maxStoredErrorLength {
+			msg = msg[:maxStoredErrorLength]
+		}
+		a.lastError = msg
 		return
 	}
 	a.lastError = ""
@@ -363,7 +369,7 @@ func (a *appState) readSingle(cfg normalizedConfig, address int) (rowResult, err
 
 func (a *appState) writeSingle(cfg normalizedConfig, address int, value int) (rowResult, error) {
 	if a.poller.IsActive() {
-		return rowResult{}, errors.New("writes are disabled while polling is active")
+		return rowResult{}, errPollingActive
 	}
 	if cfg.FunctionCode != 1 && cfg.FunctionCode != 3 {
 		return rowResult{}, errors.New("write is only allowed for function codes 01 and 03")
@@ -580,7 +586,7 @@ func (a *appState) handleWriteSingle(w http.ResponseWriter, r *http.Request) {
 	row, err := a.writeSingle(cfg, req.Address, req.Value)
 	if err != nil {
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "disabled while polling") {
+		if errors.Is(err, errPollingActive) {
 			status = http.StatusConflict
 		}
 		jsonWrite(w, status, map[string]string{"error": err.Error()})

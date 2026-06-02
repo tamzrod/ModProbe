@@ -144,6 +144,13 @@ function isPolling() {
   return el.pollEnable.checked;
 }
 
+function formatHexValue(functionCode, value) {
+  if (functionCode === 1) {
+    return value === 0 ? '0x0000' : '0x0001';
+  }
+  return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
 function setError(message = '') {
   el.errorText.textContent = message;
 }
@@ -190,7 +197,7 @@ function renderRows() {
         decTd.onclick = () => {
           const next = Number(row.value_dec) === 0 ? 1 : 0;
           row.value_dec = next;
-          row.value_hex = next ? '0x0001' : '0x0000';
+          row.value_hex = formatHexValue(1, next);
           row.exception = '';
           row.timestamp = new Date().toISOString();
           rowsByAddress.set(row.address, row);
@@ -211,13 +218,18 @@ function renderRows() {
           selection.addRange(range);
         };
         decTd.onblur = () => {
+          const functionCode = Number(el.functionCode.value);
           const parsed = Number(decTd.textContent.trim());
           if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
             decTd.textContent = String(row.value_dec ?? '');
             return;
           }
+          if (functionCode === 1 && parsed !== 0 && parsed !== 1) {
+            decTd.textContent = String(row.value_dec ?? '');
+            return;
+          }
           row.value_dec = parsed;
-          row.value_hex = `0x${parsed.toString(16).toUpperCase().padStart(4, '0')}`;
+          row.value_hex = formatHexValue(functionCode, parsed);
           row.exception = '';
           row.timestamp = new Date().toISOString();
           rowsByAddress.set(row.address, row);
