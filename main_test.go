@@ -50,6 +50,29 @@ func newTestServer() (*httptest.Server, *appState) {
 	return httptest.NewServer(st.routes()), st
 }
 
+type recordingRequester struct {
+	functions []uint8
+	payloads  [][]byte
+}
+
+func (r *recordingRequester) Do(cfg normalizedConfig, function uint8, payload []byte) (*modbusprotocol.Response, error) {
+	r.functions = append(r.functions, function)
+	cp := make([]byte, len(payload))
+	copy(cp, payload)
+	r.payloads = append(r.payloads, cp)
+
+	resp := &modbusprotocol.Response{Function: function}
+	switch function {
+	case 1:
+		resp.Payload = []byte{1, 0x01}
+	case 3:
+		resp.Payload = []byte{2, 0x00, 0x2A}
+	default:
+		resp.Payload = payload
+	}
+	return resp, nil
+}
+
 func TestBulkSingleReadWriteAndStatus(t *testing.T) {
 	ts, _ := newTestServer()
 	defer ts.Close()
@@ -149,6 +172,102 @@ func TestWriteBlockedForReadOnlyFunctions(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("write should fail for function 04, got %d", res.StatusCode)
+	}
+}
+
+func TestBulkReadSupportedFunctionCodes(t *testing.T) {
+	ts, _ := newTestServer()
+	defer ts.Close()
+
+	cases := []struct {
+		name      string
+		function  int
+		startAddr int
+		quantity  int
+		wantFirst int
+		wantLast  int
+	}{
+		{name: "fc01 coils", function: 1, startAddr: 1, quantity: 4, wantFirst: 1, wantLast: 0},
+		{name: "fc02 inputs", function: 2, startAddr: 1, quantity: 4, wantFirst: 1, wantLast: 0},
+		{name: "fc03 holding", function: 3, startAddr: 40001, quantity: 3, wantFirst: 40001, wantLast: 40003},
+		{name: "fc04 input registers", function: 4, startAddr: 30001, quantity: 3, wantFirst: 30001, wantLast: 30003},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := map[string]any{
+				"config": map[string]any{
+					"function_code": tc.function,
+					"start_address": tc.startAddr,
+					"quantity":      tc.quantity,
+					"unit_id":       1,
+					"target":        "127.0.0.1:502",
+					"timeout_ms":    500,
+				},
+			}
+			res := postJSON(t, ts.URL+"/api/read/bulk", req)
+			defer res.Body.Close()
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("unexpected status: %d", res.StatusCode)
+			}
+
+			var out map[string][]rowResult
+			if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+				t.Fatal(err)
+			}
+			rows := out["rows"]
+			if len(rows) != tc.quantity {
+				t.Fatalf("expected %d rows, got %d", tc.quantity, len(rows))
+			}
+			if rows[0].ValueDec != tc.wantFirst {
+				t.Fatalf("unexpected first value: %d", rows[0].ValueDec)
+			}
+			if rows[len(rows)-1].ValueDec != tc.wantLast {
+				t.Fatalf("unexpected last value: %d", rows[len(rows)-1].ValueDec)
+			}
+		})
+	}
+}
+
+func TestWriteMapsToModbusWriteFunctions(t *testing.T) {
+	req := &recordingRequester{}
+	st := newApp(req)
+
+	row, err := st.writeSingle(normalizedConfig{FunctionCode: 1, StartAddress: 1, Quantity: 1}, 1, 1)
+	if err != nil {
+		t.Fatalf("write with fc01 failed: %v", err)
+	}
+	if row.ValueDec != 1 {
+		t.Fatalf("unexpected readback for fc01 write: %d", row.ValueDec)
+	}
+	if len(req.functions) < 2 {
+		t.Fatalf("expected at least two modbus calls for fc01 write, got %d", len(req.functions))
+	}
+	if req.functions[0] != 5 || req.functions[1] != 1 {
+		t.Fatalf("unexpected function sequence for fc01 write: %v", req.functions[:2])
+	}
+	if got := binary.BigEndian.Uint16(req.payloads[0][2:4]); got != 0xFF00 {
+		t.Fatalf("expected coil ON payload 0xFF00, got 0x%04X", got)
+	}
+
+	req.functions = nil
+	req.payloads = nil
+
+	row, err = st.writeSingle(normalizedConfig{FunctionCode: 3, StartAddress: 40001, Quantity: 1}, 40001, 42)
+	if err != nil {
+		t.Fatalf("write with fc03 failed: %v", err)
+	}
+	if row.ValueDec != 42 {
+		t.Fatalf("unexpected readback for fc03 write: %d", row.ValueDec)
+	}
+	if len(req.functions) < 2 {
+		t.Fatalf("expected at least two modbus calls for fc03 write, got %d", len(req.functions))
+	}
+	if req.functions[0] != 6 || req.functions[1] != 3 {
+		t.Fatalf("unexpected function sequence for fc03 write: %v", req.functions[:2])
+	}
+	if got := binary.BigEndian.Uint16(req.payloads[0][2:4]); got != 42 {
+		t.Fatalf("expected register write payload 42, got %d", got)
 	}
 }
 
