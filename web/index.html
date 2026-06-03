@@ -269,7 +269,9 @@ function renderRows() {
     const exceptionTd = document.createElement('td');
     const exception = formatException(row.exception);
     exceptionTd.textContent = exception.label;
-    exceptionTd.title = exception.title;
+    if (exception.title) {
+      exceptionTd.title = exception.title;
+    }
 
     const timestampTd = document.createElement('td');
     timestampTd.textContent = row.timestamp || '';
