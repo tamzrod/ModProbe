@@ -28,8 +28,9 @@ BIND_ADDR=127.0.0.1:9090 go run .
 3. Use per-row **READ** for a single-address refresh.
 4. For FC 01 and FC 03, edit **Value (Dec)** then click per-row **WRITE**.
 5. Click **Test** beside **IP:Port** to open **Test Connection** and run either:
-   - **TCP Connection (Port Check)**
-   - **ICMP Ping**
+   - **Run TCP Test**
+   - **Run ICMP Test**
+   - The modal keeps the last **4 test samples** with clear pass/fail indicators.
 6. Enable **Poll Enable** to start backend polling. While polling is active:
    - table edits are read-only
    - WRITE is disabled
