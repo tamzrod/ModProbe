@@ -275,7 +275,7 @@ function renderRows() {
   });
 }
 
-function mergeRows(rows) {
+function syncRows(rows) {
   rows.forEach((row) => {
     rowsByAddress.set(row.address, row);
     dirtyRows.delete(row.address);
@@ -286,7 +286,7 @@ function mergeRows(rows) {
 function replaceRows(rows) {
   rowsByAddress.clear();
   dirtyRows.clear();
-  mergeRows(rows);
+  syncRows(rows);
 }
 
 function clearRowsIfRangeChanged() {
@@ -315,7 +315,7 @@ async function readSingleRow(address) {
   try {
     const data = await apiFetch('/api/read/single', { config: getConfig(), address });
     if (data.row) {
-      mergeRows([data.row]);
+      syncRows([data.row]);
     }
     await refreshStatus();
   } catch (err) {
@@ -334,7 +334,7 @@ async function writeSingleRow(address) {
       value: Number(row.value_dec)
     });
     if (data.row) {
-      mergeRows([data.row]);
+      syncRows([data.row]);
     }
     await refreshStatus();
   } catch (err) {
@@ -391,10 +391,7 @@ function ensureStatusTimer() {
 }
 
 el.readAllBtn.addEventListener('click', readAll);
-el.functionCode.addEventListener('change', () => {
-  clearRowsIfRangeChanged();
-  renderRows();
-});
+el.functionCode.addEventListener('change', clearRowsIfRangeChanged);
 el.startAddress.addEventListener('change', clearRowsIfRangeChanged);
 el.quantity.addEventListener('change', clearRowsIfRangeChanged);
 el.pollEnable.addEventListener('change', async () => {
