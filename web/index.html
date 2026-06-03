@@ -31,10 +31,68 @@
     .small-btn { padding: 0.35rem 0.5rem; font-size: 0.78rem; }
     .modal { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
     .modal.hidden { display: none; }
-    .modal-card { width: min(540px, calc(100vw - 2rem)); background: #fff; border: 1px solid #dbe2ea; border-radius: 8px; padding: 0.9rem; }
+    .modal-card {
+      width: min(620px, calc(100vw - 2rem));
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+      border: 1px solid #dbe2ea;
+      border-radius: 12px;
+      padding: 1rem;
+      box-shadow: 0 20px 45px rgba(15, 23, 42, 0.22);
+    }
     .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.55rem; }
-    .modal-header h3 { margin: 0; font-size: 1rem; }
-    .modal-output { margin-top: 0.55rem; min-height: 120px; max-height: 260px; overflow: auto; white-space: pre-wrap; border: 1px solid #dbe2ea; border-radius: 6px; background: #f8fafc; padding: 0.55rem; font-size: 0.84rem; }
+    .modal-header h3 { margin: 0; font-size: 1.2rem; }
+    .test-actions { margin-top: 0.55rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .test-action-btn {
+      border-radius: 8px;
+      border: 1px solid #cbd5e1;
+      background: #fff;
+      font-weight: 700;
+      padding: 0.5rem 0.75rem;
+      transition: transform 0.08s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+    }
+    .test-action-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px rgba(15, 23, 42, 0.12);
+      border-color: #93c5fd;
+    }
+    .modal-output {
+      margin-top: 0.7rem;
+      min-height: 240px;
+      max-height: 300px;
+      overflow: auto;
+      border: 1px solid #dbe2ea;
+      border-radius: 10px;
+      background: #f8fafc;
+      padding: 0.6rem;
+      display: grid;
+      gap: 0.45rem;
+    }
+    .test-sample-card {
+      border: 1px solid #dbe2ea;
+      border-radius: 8px;
+      background: #fff;
+      padding: 0.5rem 0.6rem;
+      display: grid;
+      gap: 0.2rem;
+      font-size: 0.84rem;
+    }
+    .test-sample-card.success { border-color: #86efac; background: #f0fdf4; }
+    .test-sample-card.fail { border-color: #fecaca; background: #fef2f2; }
+    .test-sample-card.pending { border-color: #bfdbfe; background: #eff6ff; }
+    .sample-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      width: fit-content;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+    .sample-status.success { color: #166534; background: #dcfce7; }
+    .sample-status.fail { color: #991b1b; background: #fee2e2; }
+    .sample-status.pending { color: #1d4ed8; background: #dbeafe; }
+    .sample-muted { color: #475569; font-style: italic; }
   </style>
 </head>
 <body>
@@ -122,20 +180,9 @@
       <label>IP:Port
         <input id="testTarget" type="text" />
       </label>
-      <div class="row" style="margin-top: 0.5rem; margin-bottom: 0;">
-        <label style="font-weight: 500;">
-          <input id="testTypeTcp" type="radio" name="testType" value="tcp" checked />
-          TCP Connection (Port Check)
-        </label>
-      </div>
-      <div class="row" style="margin-top: 0.2rem; margin-bottom: 0;">
-        <label style="font-weight: 500;">
-          <input id="testTypeIcmp" type="radio" name="testType" value="icmp" />
-          ICMP Ping
-        </label>
-      </div>
-      <div class="row" style="margin-top: 0.5rem; margin-bottom: 0;">
-        <button id="runTestBtn" type="button">Run Test</button>
+      <div class="test-actions">
+        <button id="runTcpTestBtn" class="test-action-btn" type="button">Run TCP Test</button>
+        <button id="runIcmpTestBtn" class="test-action-btn" type="button">Run ICMP Test</button>
       </div>
       <div id="testOutput" class="modal-output"></div>
     </div>
@@ -164,9 +211,8 @@ const el = {
   testModal: document.getElementById('testModal'),
   closeTestBtn: document.getElementById('closeTestBtn'),
   testTarget: document.getElementById('testTarget'),
-  testTypeTcp: document.getElementById('testTypeTcp'),
-  testTypeIcmp: document.getElementById('testTypeIcmp'),
-  runTestBtn: document.getElementById('runTestBtn'),
+  runTcpTestBtn: document.getElementById('runTcpTestBtn'),
+  runIcmpTestBtn: document.getElementById('runIcmpTestBtn'),
   testOutput: document.getElementById('testOutput')
 };
 
@@ -174,6 +220,7 @@ let statusTimer = null;
 // Tracks the active range config so stale rows can be cleared when range changes.
 let lastRangeKey = '';
 let previousActiveElement = null;
+const testHistory = [];
 
 function getConfig() {
   return {
@@ -231,8 +278,37 @@ function setError(message = '') {
   el.errorText.textContent = message;
 }
 
-function setTestOutput(message = '') {
-  el.testOutput.textContent = message;
+function renderTestSamples() {
+  el.testOutput.innerHTML = '';
+  for (let index = 0; index < 4; index += 1) {
+    const item = testHistory[index];
+    const card = document.createElement('div');
+    card.className = 'test-sample-card';
+    if (!item) {
+      card.innerHTML = `<div class="sample-muted">Sample ${index + 1}: waiting for test result</div>`;
+      el.testOutput.appendChild(card);
+      continue;
+    }
+    const stateClass = item.pending ? 'pending' : (item.success ? 'success' : 'fail');
+    card.classList.add(stateClass);
+    const statusLabel = item.pending ? 'RUNNING' : (item.success ? 'SUCCESS' : 'FAIL');
+    const statusIcon = item.pending ? '…' : (item.success ? '✓' : '✕');
+    const latency = Number.isFinite(item.latency_ms) ? `${item.latency_ms} ms` : 'N/A';
+    const error = item.error || '-';
+    card.innerHTML = `
+      <div class="sample-status ${stateClass}">${statusIcon} ${statusLabel}</div>
+      <div><strong>Type:</strong> ${(item.type || 'unknown').toUpperCase()}</div>
+      <div><strong>Target:</strong> ${item.target || '-'}</div>
+      <div><strong>Latency:</strong> ${latency}</div>
+      <div><strong>Error:</strong> ${error}</div>
+    `;
+    el.testOutput.appendChild(card);
+  }
+}
+
+function setTestButtonsDisabled(disabled) {
+  el.runTcpTestBtn.disabled = disabled;
+  el.runIcmpTestBtn.disabled = disabled;
 }
 
 async function apiFetch(path, payload) {
@@ -254,8 +330,8 @@ async function apiFetch(path, payload) {
 function openTestModal() {
   previousActiveElement = document.activeElement;
   el.testTarget.value = el.target.value.trim();
-  el.testTypeTcp.checked = true;
-  setTestOutput('');
+  testHistory.length = 0;
+  renderTestSamples();
   el.testModal.classList.remove('hidden');
   el.testTarget.focus();
 }
@@ -268,7 +344,7 @@ function closeTestModal() {
 }
 
 function getTestModalFocusable() {
-  return [el.closeTestBtn, el.testTarget, el.testTypeTcp, el.testTypeIcmp, el.runTestBtn]
+  return [el.closeTestBtn, el.testTarget, el.runTcpTestBtn, el.runIcmpTestBtn]
     .filter((node) => node && !node.disabled);
 }
 
@@ -295,30 +371,39 @@ function handleTestModalKeydown(event) {
   }
 }
 
-function getSelectedTestType() {
-  return el.testTypeIcmp.checked ? 'icmp' : 'tcp';
-}
-
-async function runTest() {
-  setTestOutput('Running test...');
-  el.runTestBtn.disabled = true;
+async function runTest(type) {
+  const sample = {
+    type,
+    target: el.testTarget.value.trim(),
+    success: false,
+    latency_ms: null,
+    error: '',
+    pending: true
+  };
+  testHistory.unshift(sample);
+  testHistory.length = Math.min(testHistory.length, 4);
+  renderTestSamples();
+  setTestButtonsDisabled(true);
   try {
     const data = await apiFetch('/api/test', {
-      type: getSelectedTestType(),
+      type,
       target: el.testTarget.value.trim(),
       timeout_ms: Number(el.timeoutMs.value)
     });
-    const lines = [];
-    lines.push(`Type: ${data.type || 'unknown'}`);
-    lines.push(`Target: ${data.target}`);
-    lines.push(`Status: ${data.success ? 'SUCCESS' : 'FAIL'}`);
-    lines.push(`Latency: ${Number.isFinite(data.latency_ms) ? `${data.latency_ms} ms` : 'N/A'}`);
-    lines.push(`Error: ${data.error || '-'}`);
-    setTestOutput(lines.join('\n'));
+    sample.type = data.type || type;
+    sample.target = data.target || sample.target;
+    sample.success = Boolean(data.success);
+    sample.latency_ms = Number.isFinite(data.latency_ms) ? data.latency_ms : null;
+    sample.error = data.error || '';
+    sample.pending = false;
+    renderTestSamples();
   } catch (err) {
-    setTestOutput(`Test failed: ${err.message}`);
+    sample.success = false;
+    sample.error = err.message;
+    sample.pending = false;
+    renderTestSamples();
   } finally {
-    el.runTestBtn.disabled = false;
+    setTestButtonsDisabled(false);
   }
 }
 
@@ -546,7 +631,8 @@ function ensureStatusTimer() {
 el.readAllBtn.addEventListener('click', readAll);
 el.openTestBtn.addEventListener('click', openTestModal);
 el.closeTestBtn.addEventListener('click', closeTestModal);
-el.runTestBtn.addEventListener('click', runTest);
+el.runTcpTestBtn.addEventListener('click', () => runTest('tcp'));
+el.runIcmpTestBtn.addEventListener('click', () => runTest('icmp'));
 document.addEventListener('keydown', handleTestModalKeydown);
 el.functionCode.addEventListener('change', clearRowsIfRangeChanged);
 el.startAddress.addEventListener('change', clearRowsIfRangeChanged);
