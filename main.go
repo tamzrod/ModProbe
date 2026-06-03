@@ -802,7 +802,7 @@ func (a *appState) handleTest(w http.ResponseWriter, r *http.Request) {
 	}
 	result := runTestWithTimeout(req.Type, req.Target, time.Duration(req.TimeoutMS)*time.Millisecond)
 	if result.Error != "" {
-		if req.Type != TestTCP && req.Type != TestICMP || strings.HasPrefix(result.Error, "invalid target:") {
+		if (req.Type != TestTCP && req.Type != TestICMP) || strings.HasPrefix(result.Error, "invalid target:") {
 			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": result.Error})
 			return
 		}
