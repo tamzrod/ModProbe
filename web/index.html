@@ -157,6 +157,27 @@ function formatHexValue(functionCode, value) {
   return `0x${value.toString(16).toUpperCase().padStart(4, '0')}`;
 }
 
+const EXCEPTION_LABELS = {
+  '0x01': 'Illegal Function',
+  '0x02': 'Illegal Data Address',
+  '0x03': 'Illegal Data Value',
+  '0x04': 'Server Device Failure',
+  '0x05': 'Acknowledge',
+  '0x06': 'Server Device Busy',
+  '0x08': 'Memory Parity Error',
+  '0x0A': 'Gateway Path Unavailable',
+  '0x0B': 'Gateway Target Device Failed to Respond'
+};
+
+function formatException(code) {
+  const normalized = String(code || '').trim().toUpperCase();
+  if (!normalized) return { label: '', title: '' };
+  return {
+    label: EXCEPTION_LABELS[normalized] || 'Unknown Exception',
+    title: normalized
+  };
+}
+
 function setError(message = '') {
   el.errorText.textContent = message;
 }
@@ -246,7 +267,9 @@ function renderRows() {
     }
 
     const exceptionTd = document.createElement('td');
-    exceptionTd.textContent = row.exception || '';
+    const exception = formatException(row.exception);
+    exceptionTd.textContent = exception.label;
+    exceptionTd.title = exception.title;
 
     const timestampTd = document.createElement('td');
     timestampTd.textContent = row.timestamp || '';
