@@ -72,4 +72,4 @@ Rules enforced:
 - WRITE blocked during polling
 - FC02/FC04 rows are read-only
 - edited values highlight until written
-- exception codes are displayed per row
+- exception name is displayed per row, with the raw exception code in the cell tooltip

@@ -64,4 +64,4 @@ BIND_ADDR=127.0.0.1:9090 go run .
 
 - Only `github.com/tamzrod/modbus` is used for Modbus transport/protocol.
 - No retry logic is implemented.
-- Modbus exception codes are preserved in table responses.
+- Modbus exception codes are preserved in table responses and exposed in the Exception cell tooltip.
