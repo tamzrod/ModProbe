@@ -626,8 +626,8 @@ func TCPConnectTest(target string, timeout time.Duration) (duration time.Duratio
 	return time.Since(start), nil
 }
 
-var pingLatencyRegex = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
-var pingLatencyWindowsRegex = regexp.MustCompile(`Average\s*=\s*([0-9]*\.?[0-9]+)ms`)
+var icmpLatencyRegex = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
+var icmpLatencyWindowsRegex = regexp.MustCompile(`Average\s*=\s*([0-9]*\.?[0-9]+)ms`)
 
 func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err error) {
 	seconds := int(timeout / time.Second)
@@ -658,14 +658,14 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 		}
 		return 0, errors.New(msg)
 	}
-	match := pingLatencyRegex.FindStringSubmatch(string(output))
+	match := icmpLatencyRegex.FindStringSubmatch(string(output))
 	if len(match) > 1 {
 		ms, parseErr := strconv.ParseFloat(match[1], 64)
 		if parseErr == nil {
 			return time.Duration(ms * float64(time.Millisecond)), nil
 		}
 	}
-	windowsMatch := pingLatencyWindowsRegex.FindStringSubmatch(string(output))
+	windowsMatch := icmpLatencyWindowsRegex.FindStringSubmatch(string(output))
 	if len(windowsMatch) > 1 {
 		ms, parseErr := strconv.ParseFloat(windowsMatch[1], 64)
 		if parseErr == nil {
