@@ -626,8 +626,8 @@ func TCPConnectTest(target string, timeout time.Duration) (duration time.Duratio
 	return time.Since(start), nil
 }
 
-var icmpLatencyRegex = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
-var icmpLatencyWindowsRegex = regexp.MustCompile(`Average\s*=\s*([0-9]*\.?[0-9]+)ms`)
+var icmpLatencyRe = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
+var icmpLatencyWindowsRe = regexp.MustCompile(`Average\s*=\s*([0-9]*\.?[0-9]+)ms`)
 
 func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err error) {
 	seconds := int(timeout / time.Second)
@@ -648,7 +648,7 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 		}
 		cmd = exec.CommandContext(ctx, "ping", "-n", "1", "-w", strconv.Itoa(timeoutMS), host)
 	} else {
-		cmd = exec.CommandContext(ctx, "ping", "-n", "-c", "1", "-W", strconv.Itoa(seconds), host)
+		cmd = exec.CommandContext(ctx, "ping", "-c", "1", "-W", strconv.Itoa(seconds), host)
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -658,14 +658,14 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 		}
 		return 0, errors.New(msg)
 	}
-	match := icmpLatencyRegex.FindStringSubmatch(string(output))
+	match := icmpLatencyRe.FindStringSubmatch(string(output))
 	if len(match) > 1 {
 		ms, parseErr := strconv.ParseFloat(match[1], 64)
 		if parseErr == nil {
 			return time.Duration(ms * float64(time.Millisecond)), nil
 		}
 	}
-	windowsMatch := icmpLatencyWindowsRegex.FindStringSubmatch(string(output))
+	windowsMatch := icmpLatencyWindowsRe.FindStringSubmatch(string(output))
 	if len(windowsMatch) > 1 {
 		ms, parseErr := strconv.ParseFloat(windowsMatch[1], 64)
 		if parseErr == nil {
@@ -802,11 +802,7 @@ func (a *appState) handleTest(w http.ResponseWriter, r *http.Request) {
 	}
 	result := runTestWithTimeout(req.Type, req.Target, time.Duration(req.TimeoutMS)*time.Millisecond)
 	if result.Error != "" {
-		if req.Type != TestTCP && req.Type != TestICMP {
-			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": result.Error})
-			return
-		}
-		if strings.HasPrefix(result.Error, "invalid target:") {
+		if req.Type != TestTCP && req.Type != TestICMP || strings.HasPrefix(result.Error, "invalid target:") {
 			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": result.Error})
 			return
 		}
