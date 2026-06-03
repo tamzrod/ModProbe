@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -626,6 +627,7 @@ func TCPConnectTest(target string, timeout time.Duration) (duration time.Duratio
 }
 
 var pingLatencyRegex = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
+var pingLatencyWindowsRegex = regexp.MustCompile(`Average\s*=\s*([0-9]*\.?[0-9]+)ms`)
 
 func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err error) {
 	seconds := int(timeout / time.Second)
@@ -637,7 +639,17 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+500*time.Millisecond)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ping", "-n", "-c", "1", "-W", strconv.Itoa(seconds), host)
+	start := time.Now()
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		timeoutMS := int(timeout / time.Millisecond)
+		if timeoutMS < 1 {
+			timeoutMS = 1
+		}
+		cmd = exec.CommandContext(ctx, "ping", "-n", "1", "-w", strconv.Itoa(timeoutMS), host)
+	} else {
+		cmd = exec.CommandContext(ctx, "ping", "-n", "-c", "1", "-W", strconv.Itoa(seconds), host)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(output))
@@ -653,7 +665,14 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 			return time.Duration(ms * float64(time.Millisecond)), nil
 		}
 	}
-	return timeout, nil
+	windowsMatch := pingLatencyWindowsRegex.FindStringSubmatch(string(output))
+	if len(windowsMatch) > 1 {
+		ms, parseErr := strconv.ParseFloat(windowsMatch[1], 64)
+		if parseErr == nil {
+			return time.Duration(ms * float64(time.Millisecond)), nil
+		}
+	}
+	return time.Since(start), nil
 }
 
 var tcpConnectTestFn = TCPConnectTest

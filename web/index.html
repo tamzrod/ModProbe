@@ -312,7 +312,7 @@ async function runTest() {
     lines.push(`Type: ${data.type || 'unknown'}`);
     lines.push(`Target: ${data.target}`);
     lines.push(`Status: ${data.success ? 'SUCCESS' : 'FAIL'}`);
-    lines.push(`Latency: ${Number.isFinite(data.latency_ms) ? `${data.latency_ms} ms` : 'n/a'}`);
+    lines.push(`Latency: ${Number.isFinite(data.latency_ms) ? `${data.latency_ms} ms` : 'N/A'}`);
     lines.push(`Error: ${data.error || '-'}`);
     setTestOutput(lines.join('\n'));
   } catch (err) {
