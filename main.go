@@ -687,11 +687,11 @@ func runTestWithTimeout(testType TestType, target string, timeout time.Duration)
 	switch testType {
 	case TestTCP:
 		normalizedTarget, err := normalizeTCPTestTarget(target)
-		result.Target = normalizedTarget
 		if err != nil {
 			result.Error = err.Error()
 			return result
 		}
+		result.Target = normalizedTarget
 		latency, testErr := tcpConnectTestFn(normalizedTarget, timeout)
 		result.Success = testErr == nil
 		result.Latency = latency
@@ -700,11 +700,11 @@ func runTestWithTimeout(testType TestType, target string, timeout time.Duration)
 		}
 	case TestICMP:
 		host, err := normalizeICMPHost(target)
-		result.Target = host
 		if err != nil {
 			result.Error = err.Error()
 			return result
 		}
+		result.Target = host
 		latency, testErr := icmpPingFn(host, timeout)
 		result.Success = testErr == nil
 		result.Latency = latency
@@ -793,6 +793,10 @@ func (a *appState) handleTest(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
+	if req.Type != TestTCP && req.Type != TestICMP {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "unsupported test type"})
+		return
+	}
 	if req.TimeoutMS == 0 {
 		req.TimeoutMS = defaultTestTimeoutMS
 	}
@@ -802,7 +806,7 @@ func (a *appState) handleTest(w http.ResponseWriter, r *http.Request) {
 	}
 	result := runTestWithTimeout(req.Type, req.Target, time.Duration(req.TimeoutMS)*time.Millisecond)
 	if result.Error != "" {
-		if (req.Type != TestTCP && req.Type != TestICMP) || strings.HasPrefix(result.Error, "invalid target:") {
+		if strings.HasPrefix(result.Error, "invalid target:") {
 			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": result.Error})
 			return
 		}
