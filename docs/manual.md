@@ -23,6 +23,7 @@ BIND_ADDR=127.0.0.1:9090 go run .
 ## Basic mode workflow
 
 1. Set **IP:Port**, **Unit ID**, **Timeout ms**, **Function Code**, **Start Address**, and **Quantity**.
+   - Addressing is zero-based (`0` to `65535`).
 2. Click **READ ALL** to read the full range.
 3. Use per-row **READ** for a single-address refresh.
 4. For FC 01 and FC 03, edit **Value (Dec)** then click per-row **WRITE**.
@@ -49,7 +50,7 @@ BIND_ADDR=127.0.0.1:9090 go run .
     "unit_id": 1,
     "timeout_ms": 500,
     "function_code": 3,
-    "start_address": 40001,
+    "start_address": 0,
     "quantity": 10
   }
 }

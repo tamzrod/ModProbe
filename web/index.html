@@ -53,7 +53,7 @@
         </select>
       </label>
       <label>Start Address
-        <input id="startAddress" type="number" min="1" value="40001" />
+        <input id="startAddress" type="number" min="0" value="0" />
       </label>
       <label>Quantity
         <input id="quantity" type="number" min="1" value="10" />
@@ -123,6 +123,7 @@ const el = {
 };
 
 let statusTimer = null;
+let lastRangeKey = '';
 
 function getConfig() {
   return {
@@ -133,6 +134,10 @@ function getConfig() {
     start_address: Number(el.startAddress.value),
     quantity: Number(el.quantity.value)
   };
+}
+
+function getRangeKey() {
+  return `${Number(el.functionCode.value)}:${Number(el.startAddress.value)}:${Number(el.quantity.value)}`;
 }
 
 function isWriteMode() {
@@ -270,7 +275,7 @@ function renderRows() {
   });
 }
 
-function syncRows(rows) {
+function mergeRows(rows) {
   rows.forEach((row) => {
     rowsByAddress.set(row.address, row);
     dirtyRows.delete(row.address);
@@ -278,11 +283,27 @@ function syncRows(rows) {
   renderRows();
 }
 
+function replaceRows(rows) {
+  rowsByAddress.clear();
+  dirtyRows.clear();
+  mergeRows(rows);
+}
+
+function clearRowsIfRangeChanged() {
+  const nextKey = getRangeKey();
+  if (nextKey === lastRangeKey) return;
+  lastRangeKey = nextKey;
+  rowsByAddress.clear();
+  dirtyRows.clear();
+  renderRows();
+}
+
 async function readAll() {
   setError('');
+  clearRowsIfRangeChanged();
   try {
     const data = await apiFetch('/api/read/bulk', { config: getConfig() });
-    syncRows(data.rows || []);
+    replaceRows(data.rows || []);
     await refreshStatus();
   } catch (err) {
     setError(err.message);
@@ -294,9 +315,7 @@ async function readSingleRow(address) {
   try {
     const data = await apiFetch('/api/read/single', { config: getConfig(), address });
     if (data.row) {
-      rowsByAddress.set(address, data.row);
-      dirtyRows.delete(address);
-      renderRows();
+      mergeRows([data.row]);
     }
     await refreshStatus();
   } catch (err) {
@@ -315,9 +334,7 @@ async function writeSingleRow(address) {
       value: Number(row.value_dec)
     });
     if (data.row) {
-      rowsByAddress.set(address, data.row);
-      dirtyRows.delete(address);
-      renderRows();
+      mergeRows([data.row]);
     }
     await refreshStatus();
   } catch (err) {
@@ -335,7 +352,7 @@ async function refreshStatus() {
       ? `Running (${status.polling_interval_ms} ms)`
       : 'Stopped';
     if (status.polling_active && Array.isArray(status.rows)) {
-      syncRows(status.rows);
+      replaceRows(status.rows);
     }
   } catch (err) {
     setError(err.message);
@@ -374,7 +391,12 @@ function ensureStatusTimer() {
 }
 
 el.readAllBtn.addEventListener('click', readAll);
-el.functionCode.addEventListener('change', renderRows);
+el.functionCode.addEventListener('change', () => {
+  clearRowsIfRangeChanged();
+  renderRows();
+});
+el.startAddress.addEventListener('change', clearRowsIfRangeChanged);
+el.quantity.addEventListener('change', clearRowsIfRangeChanged);
 el.pollEnable.addEventListener('change', async () => {
   if (el.pollEnable.checked) {
     await startPolling();
@@ -384,6 +406,7 @@ el.pollEnable.addEventListener('change', async () => {
 });
 
 ensureStatusTimer();
+lastRangeKey = getRangeKey();
 readAll();
 </script>
 </body>

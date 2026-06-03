@@ -29,7 +29,7 @@ func (m *mockRequester) Do(cfg normalizedConfig, function uint8, payload []byte)
 		}
 		resp.Payload = body
 	case 3, 4:
-		start := int(binary.BigEndian.Uint16(payload[0:2])) + 1
+		start := int(binary.BigEndian.Uint16(payload[0:2]))
 		qty := int(binary.BigEndian.Uint16(payload[2:4]))
 		body := bytes.NewBuffer([]byte{uint8(qty * 2)})
 		for i := 0; i < qty; i++ {
@@ -187,10 +187,10 @@ func TestBulkReadSupportedFunctionCodes(t *testing.T) {
 		wantFirst int
 		wantLast  int
 	}{
-		{name: "fc01 coils", function: 1, startAddr: 1, quantity: 4, wantFirst: 1, wantLast: 0},
-		{name: "fc02 inputs", function: 2, startAddr: 1, quantity: 4, wantFirst: 1, wantLast: 0},
-		{name: "fc03 holding", function: 3, startAddr: 40001, quantity: 3, wantFirst: 40001, wantLast: 40003},
-		{name: "fc04 input registers", function: 4, startAddr: 30001, quantity: 3, wantFirst: 30001, wantLast: 30003},
+		{name: "fc01 coils", function: 1, startAddr: 0, quantity: 4, wantFirst: 1, wantLast: 0},
+		{name: "fc02 inputs", function: 2, startAddr: 0, quantity: 4, wantFirst: 1, wantLast: 0},
+		{name: "fc03 holding", function: 3, startAddr: 0, quantity: 3, wantFirst: 0, wantLast: 2},
+		{name: "fc04 input registers", function: 4, startAddr: 0, quantity: 3, wantFirst: 0, wantLast: 2},
 	}
 
 	for _, tc := range cases {
