@@ -41,6 +41,7 @@ const (
 	maxRegisterReadCount = 125
 	maxBitReadCount      = 2000
 	defaultTestTimeoutMS = 2500
+	icmpCommandBufferMS  = 500
 	maxRequestBodySize   = 1 << 20
 	maxStoredErrorLength = 1000
 )
@@ -626,7 +627,7 @@ func TCPConnectTest(target string, timeout time.Duration) (duration time.Duratio
 	return time.Since(start), nil
 }
 
-var icmpLatencyRe = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
+var icmpLatencyUnixRe = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
 var icmpLatencyWindowsRe = regexp.MustCompile(`Average\s*=\s*([0-9]*\.?[0-9]+)ms`)
 
 func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err error) {
@@ -637,7 +638,7 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 	if seconds < 1 {
 		seconds = 1
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout+500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+time.Duration(icmpCommandBufferMS)*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	var cmd *exec.Cmd
@@ -658,7 +659,7 @@ func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err e
 		}
 		return 0, errors.New(msg)
 	}
-	match := icmpLatencyRe.FindStringSubmatch(string(output))
+	match := icmpLatencyUnixRe.FindStringSubmatch(string(output))
 	if len(match) > 1 {
 		ms, parseErr := strconv.ParseFloat(match[1], 64)
 		if parseErr == nil {
