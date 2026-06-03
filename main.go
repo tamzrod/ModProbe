@@ -85,8 +85,8 @@ type pollingStartRequest struct {
 
 type testRequest struct {
 	Type      TestType `json:"type"`
-	Target    string `json:"target"`
-	TimeoutMS int    `json:"timeout_ms"`
+	Target    string   `json:"target"`
+	TimeoutMS int      `json:"timeout_ms"`
 }
 
 type TestType string
