@@ -26,7 +26,7 @@ const (
 	defaultUnitID        = 1
 	defaultTimeoutMS     = 500
 	defaultFunctionCode  = 3
-	defaultStartAddress  = 40001
+	defaultStartAddress  = 0
 	defaultQuantity      = 10
 	defaultPollingMS     = 1000
 	maxTimeoutMS         = 60000
@@ -145,7 +145,7 @@ func normalizeConfig(cfg connectionConfig) (normalizedConfig, error) {
 	if cfg.TimeoutMS < 1 || cfg.TimeoutMS > maxTimeoutMS {
 		return normalizedConfig{}, errors.New("timeout_ms out of range")
 	}
-	if cfg.StartAddress < 1 || cfg.StartAddress > math.MaxUint16+1 {
+	if cfg.StartAddress < 0 || cfg.StartAddress > math.MaxUint16 {
 		return normalizedConfig{}, errors.New("start_address out of range")
 	}
 	if cfg.Quantity < 1 {
@@ -163,7 +163,7 @@ func normalizeConfig(cfg connectionConfig) (normalizedConfig, error) {
 	if _, err := humanAddressToDevice(cfg.StartAddress); err != nil {
 		return normalizedConfig{}, err
 	}
-	if cfg.StartAddress+cfg.Quantity-1 > math.MaxUint16+1 {
+	if cfg.StartAddress+cfg.Quantity-1 > math.MaxUint16 {
 		return normalizedConfig{}, errors.New("address range out of bounds")
 	}
 
@@ -178,10 +178,10 @@ func normalizeConfig(cfg connectionConfig) (normalizedConfig, error) {
 }
 
 func humanAddressToDevice(address int) (uint16, error) {
-	if address < 1 || address > math.MaxUint16+1 {
+	if address < 0 || address > math.MaxUint16 {
 		return 0, errors.New("address out of range")
 	}
-	return uint16(address - 1), nil
+	return uint16(address), nil
 }
 
 func buildReadPayload(startAddr, qty uint16) []byte {
