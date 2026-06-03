@@ -328,6 +328,45 @@ func TestPingEndpointRunsFourAttempts(t *testing.T) {
 	}
 }
 
+func TestNormalizePingTarget(t *testing.T) {
+	t.Run("host with port stays unchanged", func(t *testing.T) {
+		got, err := normalizePingTarget("192.168.0.10:503")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "192.168.0.10:503" {
+			t.Fatalf("unexpected target: %s", got)
+		}
+	})
+
+	t.Run("host without port gets default", func(t *testing.T) {
+		got, err := normalizePingTarget("localhost")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "localhost:502" {
+			t.Fatalf("unexpected target: %s", got)
+		}
+	})
+
+	t.Run("raw ipv6 gets default port", func(t *testing.T) {
+		got, err := normalizePingTarget("::1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "[::1]:502" {
+			t.Fatalf("unexpected target: %s", got)
+		}
+	})
+
+	t.Run("invalid port fails", func(t *testing.T) {
+		_, err := normalizePingTarget("localhost:99999")
+		if err == nil {
+			t.Fatal("expected error for invalid port")
+		}
+	})
+}
+
 func postJSON(t *testing.T, url string, payload any) *http.Response {
 	t.Helper()
 	body, err := json.Marshal(payload)

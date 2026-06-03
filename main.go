@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 const (
 	defaultBindAddr      = "localhost:8080"
 	defaultTarget        = "127.0.0.1:502"
+	defaultTargetPort    = "502"
 	defaultUnitID        = 1
 	defaultTimeoutMS     = 500
 	defaultFunctionCode  = 3
@@ -84,9 +86,9 @@ type pingRequest struct {
 }
 
 type pingAttemptResult struct {
-	Attempt int   `json:"attempt"`
-	RTTMS   int64 `json:"rtt_ms,omitempty"`
-	Success bool  `json:"success"`
+	Attempt int    `json:"attempt"`
+	RTTMS   int64  `json:"rtt_ms,omitempty"`
+	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
 }
 
@@ -547,18 +549,29 @@ func normalizePingTarget(target string) (string, error) {
 	if target == "" {
 		target = defaultTarget
 	}
-	if _, _, err := net.SplitHostPort(target); err == nil {
+	if host, port, err := net.SplitHostPort(target); err == nil {
+		if strings.TrimSpace(host) == "" {
+			return "", errors.New("invalid target: host cannot be empty")
+		}
+		portNum, convErr := strconv.Atoi(port)
+		if convErr != nil || portNum < 1 || portNum > 65535 {
+			return "", errors.New("invalid target: port must be between 1 and 65535")
+		}
 		return target, nil
 	}
-	if host, port, err := net.SplitHostPort(defaultTarget); err == nil && port != "" {
-		if net.ParseIP(target) != nil {
-			return net.JoinHostPort(target, port), nil
-		}
-		if strings.Contains(host, ".") || strings.Contains(target, ".") || !strings.Contains(target, ":") {
-			return net.JoinHostPort(target, port), nil
-		}
+	defaultPortNum, convErr := strconv.Atoi(defaultTargetPort)
+	if convErr != nil || defaultPortNum < 1 || defaultPortNum > 65535 {
+		return "", fmt.Errorf("default target port %q is misconfigured", defaultTargetPort)
 	}
-	return "", errors.New("invalid target format")
+	if strings.Contains(target, ":") {
+		// Allow raw IPv6 address without port; bracket + append default port.
+		if ip := net.ParseIP(target); ip != nil && ip.To4() == nil {
+			return net.JoinHostPort(target, defaultTargetPort), nil
+		}
+		return "", errors.New("invalid target: expected host:port or valid IPv6 address")
+	}
+	// Hostname or IPv4 without port; append default Modbus port.
+	return net.JoinHostPort(target, defaultTargetPort), nil
 }
 
 func (a *appState) handleBulkRead(w http.ResponseWriter, r *http.Request) {
