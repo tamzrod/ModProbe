@@ -221,6 +221,7 @@ let statusTimer = null;
 let lastRangeKey = '';
 let previousActiveElement = null;
 const testHistory = [];
+const MAX_TEST_HISTORY_SIZE = 4;
 
 function getConfig() {
   return {
@@ -280,12 +281,12 @@ function setError(message = '') {
 
 function renderTestSamples() {
   el.testOutput.innerHTML = '';
-  for (let index = 0; index < 4; index += 1) {
+  for (let index = 0; index < MAX_TEST_HISTORY_SIZE; index += 1) {
     const item = testHistory[index];
     const card = document.createElement('div');
     card.className = 'test-sample-card';
     if (!item) {
-      card.innerHTML = `<div class="sample-muted">Sample ${index + 1}: waiting for test result</div>`;
+      card.innerHTML = `<div class="sample-muted">Test slot ${index + 1}: waiting for result</div>`;
       el.testOutput.appendChild(card);
       continue;
     }
@@ -293,7 +294,7 @@ function renderTestSamples() {
     card.classList.add(stateClass);
     const statusLabel = item.pending ? 'RUNNING' : (item.success ? 'SUCCESS' : 'FAIL');
     const statusIcon = item.pending ? '…' : (item.success ? '✓' : '✕');
-    const latency = Number.isFinite(item.latency_ms) ? `${item.latency_ms} ms` : 'N/A';
+    const latency = Number.isFinite(item.latency_ms) ? `${item.latency_ms.toFixed(2)} ms` : 'N/A';
     const error = item.error || '-';
     card.innerHTML = `
       <div class="sample-status ${stateClass}">${statusIcon} ${statusLabel}</div>
@@ -381,7 +382,9 @@ async function runTest(type) {
     pending: true
   };
   testHistory.unshift(sample);
-  testHistory.length = Math.min(testHistory.length, 4);
+  if (testHistory.length > MAX_TEST_HISTORY_SIZE) {
+    testHistory.length = MAX_TEST_HISTORY_SIZE;
+  }
   renderTestSamples();
   setTestButtonsDisabled(true);
   try {
