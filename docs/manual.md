@@ -27,7 +27,10 @@ BIND_ADDR=127.0.0.1:9090 go run .
 2. Click **READ ALL** to read the full range.
 3. Use per-row **READ** for a single-address refresh.
 4. For FC 01 and FC 03, edit **Value (Dec)** then click per-row **WRITE**.
-5. Enable **Poll Enable** to start backend polling. While polling is active:
+5. Click **Test** beside **IP:Port** to open **Test Connection** and run either:
+   - **TCP Connection (Port Check)**
+   - **ICMP Ping**
+6. Enable **Poll Enable** to start backend polling. While polling is active:
    - table edits are read-only
    - WRITE is disabled
    - per-row READ remains available
@@ -37,6 +40,7 @@ BIND_ADDR=127.0.0.1:9090 go run .
 - `POST /api/read/bulk`
 - `POST /api/read/single`
 - `POST /api/write/single`
+- `POST /api/test`
 - `POST /api/polling/start`
 - `POST /api/polling/stop`
 - `GET /api/status`
@@ -58,6 +62,28 @@ BIND_ADDR=127.0.0.1:9090 go run .
 
 - `/api/read/single` adds `address`
 - `/api/write/single` adds `address` and `value`
+- `/api/test` body:
+
+```json
+{
+  "type": "tcp",
+  "target": "127.0.0.1:502",
+  "timeout_ms": 2500
+}
+```
+
+- `/api/test` response:
+
+```json
+{
+  "type": "tcp",
+  "target": "127.0.0.1:502",
+  "success": true,
+  "latency_ms": 12,
+  "error": ""
+}
+```
+
 - `/api/polling/start` adds `interval_ms`
 
 ## Notes

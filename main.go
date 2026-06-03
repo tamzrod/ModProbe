@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,7 +39,7 @@ const (
 	maxPollIntervalMS    = 60000
 	maxRegisterReadCount = 125
 	maxBitReadCount      = 2000
-	defaultPingAttempts  = 4
+	defaultTestTimeoutMS = 2500
 	maxRequestBodySize   = 1 << 20
 	maxStoredErrorLength = 1000
 )
@@ -80,16 +83,25 @@ type pollingStartRequest struct {
 	IntervalMS int              `json:"interval_ms"`
 }
 
-type pingRequest struct {
+type testRequest struct {
+	Type      TestType `json:"type"`
 	Target    string `json:"target"`
 	TimeoutMS int    `json:"timeout_ms"`
 }
 
-type pingAttemptResult struct {
-	Attempt int    `json:"attempt"`
-	RTTMS   int64  `json:"rtt_ms,omitempty"`
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
+type TestType string
+
+const (
+	TestTCP  TestType = "tcp"
+	TestICMP TestType = "icmp"
+)
+
+type TestResult struct {
+	Type    string        `json:"type"`
+	Target  string        `json:"target"`
+	Success bool          `json:"success"`
+	Latency time.Duration `json:"-"`
+	Error   string        `json:"error"`
 }
 
 type modbusRequester interface {
@@ -536,7 +548,7 @@ func (a *appState) routes() http.Handler {
 	mux.HandleFunc("/api/read/bulk", a.handleBulkRead)
 	mux.HandleFunc("/api/read/single", a.handleSingleRead)
 	mux.HandleFunc("/api/write/single", a.handleWriteSingle)
-	mux.HandleFunc("/api/ping", a.handlePing)
+	mux.HandleFunc("/api/test", a.handleTest)
 	mux.HandleFunc("/api/polling/start", a.handlePollingStart)
 	mux.HandleFunc("/api/polling/stop", a.handlePollingStop)
 	mux.HandleFunc("/api/status", a.handleStatus)
@@ -544,7 +556,7 @@ func (a *appState) routes() http.Handler {
 	return mux
 }
 
-func normalizePingTarget(target string) (string, error) {
+func normalizeTCPTestTarget(target string) (string, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		target = defaultTarget
@@ -572,6 +584,118 @@ func normalizePingTarget(target string) (string, error) {
 	}
 	// Hostname or IPv4 without port; append default Modbus port.
 	return net.JoinHostPort(target, defaultTargetPort), nil
+}
+
+func normalizeICMPHost(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = defaultTarget
+	}
+	if host, port, err := net.SplitHostPort(target); err == nil {
+		if strings.TrimSpace(host) == "" {
+			return "", errors.New("invalid target: host cannot be empty")
+		}
+		if port != "" {
+			portNum, convErr := strconv.Atoi(port)
+			if convErr != nil || portNum < 1 || portNum > 65535 {
+				return "", errors.New("invalid target: port must be between 1 and 65535")
+			}
+		}
+		return host, nil
+	}
+	if strings.HasPrefix(target, "[") && strings.HasSuffix(target, "]") {
+		target = strings.TrimPrefix(strings.TrimSuffix(target, "]"), "[")
+	}
+	if strings.Contains(target, ":") {
+		if ip := net.ParseIP(target); ip != nil && ip.To4() == nil {
+			return target, nil
+		}
+		return "", errors.New("invalid target: expected host, host:port, or valid IPv6 address")
+	}
+	return target, nil
+}
+
+func TCPConnectTest(target string, timeout time.Duration) (duration time.Duration, err error) {
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", target, timeout)
+	if err != nil {
+		return 0, err
+	}
+	_ = conn.Close()
+	return time.Since(start), nil
+}
+
+var pingLatencyRegex = regexp.MustCompile(`time[=<]\s*([0-9]*\.?[0-9]+)\s*ms`)
+
+func ICMPPing(host string, timeout time.Duration) (duration time.Duration, err error) {
+	seconds := int(timeout / time.Second)
+	if timeout%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+500*time.Millisecond)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ping", "-n", "-c", "1", "-W", strconv.Itoa(seconds), host)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(output))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return 0, errors.New(msg)
+	}
+	match := pingLatencyRegex.FindStringSubmatch(string(output))
+	if len(match) > 1 {
+		ms, parseErr := strconv.ParseFloat(match[1], 64)
+		if parseErr == nil {
+			return time.Duration(ms * float64(time.Millisecond)), nil
+		}
+	}
+	return timeout, nil
+}
+
+var tcpConnectTestFn = TCPConnectTest
+var icmpPingFn = ICMPPing
+
+func RunTest(testType TestType, target string) (result TestResult) {
+	return runTestWithTimeout(testType, target, time.Duration(defaultTestTimeoutMS)*time.Millisecond)
+}
+
+func runTestWithTimeout(testType TestType, target string, timeout time.Duration) (result TestResult) {
+	result.Type = string(testType)
+	switch testType {
+	case TestTCP:
+		normalizedTarget, err := normalizeTCPTestTarget(target)
+		result.Target = normalizedTarget
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		latency, testErr := tcpConnectTestFn(normalizedTarget, timeout)
+		result.Success = testErr == nil
+		result.Latency = latency
+		if testErr != nil {
+			result.Error = testErr.Error()
+		}
+	case TestICMP:
+		host, err := normalizeICMPHost(target)
+		result.Target = host
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		latency, testErr := icmpPingFn(host, timeout)
+		result.Success = testErr == nil
+		result.Latency = latency
+		if testErr != nil {
+			result.Error = testErr.Error()
+		}
+	default:
+		result.Error = "unsupported test type"
+	}
+	return result
 }
 
 func (a *appState) handleBulkRead(w http.ResponseWriter, r *http.Request) {
@@ -642,55 +766,38 @@ func (a *appState) handleWriteSingle(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, http.StatusOK, map[string]any{"row": row})
 }
 
-func (a *appState) handlePing(w http.ResponseWriter, r *http.Request) {
+func (a *appState) handleTest(w http.ResponseWriter, r *http.Request) {
 	if !methodGuard(w, r, http.MethodPost) {
 		return
 	}
-	var req pingRequest
+	var req testRequest
 	if !decodeJSONBody(w, r, &req) {
 		return
 	}
-	target, err := normalizePingTarget(req.Target)
-	if err != nil {
-		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
 	if req.TimeoutMS == 0 {
-		req.TimeoutMS = defaultTimeoutMS
+		req.TimeoutMS = defaultTestTimeoutMS
 	}
 	if req.TimeoutMS < 1 || req.TimeoutMS > maxTimeoutMS {
 		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "timeout_ms out of range"})
 		return
 	}
-	timeout := time.Duration(req.TimeoutMS) * time.Millisecond
-	results := make([]pingAttemptResult, 0, defaultPingAttempts)
-	successCount := 0
-
-	for i := 1; i <= defaultPingAttempts; i++ {
-		start := time.Now()
-		conn, dialErr := net.DialTimeout("tcp", target, timeout)
-		if dialErr != nil {
-			results = append(results, pingAttemptResult{
-				Attempt: i,
-				Success: false,
-				Error:   dialErr.Error(),
-			})
-			continue
+	result := runTestWithTimeout(req.Type, req.Target, time.Duration(req.TimeoutMS)*time.Millisecond)
+	if result.Error != "" {
+		if req.Type != TestTCP && req.Type != TestICMP {
+			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": result.Error})
+			return
 		}
-		_ = conn.Close()
-		successCount++
-		results = append(results, pingAttemptResult{
-			Attempt: i,
-			Success: true,
-			RTTMS:   time.Since(start).Milliseconds(),
-		})
+		if strings.HasPrefix(result.Error, "invalid target:") {
+			jsonWrite(w, http.StatusBadRequest, map[string]string{"error": result.Error})
+			return
+		}
 	}
-
 	jsonWrite(w, http.StatusOK, map[string]any{
-		"target":         target,
-		"attempts_total": defaultPingAttempts,
-		"success_count":  successCount,
-		"attempts":       results,
+		"type":       result.Type,
+		"target":     result.Target,
+		"success":    result.Success,
+		"latency_ms": result.Latency.Milliseconds(),
+		"error":      result.Error,
 	})
 }
 
