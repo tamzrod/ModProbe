@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -268,6 +269,62 @@ func TestWriteMapsToModbusWriteFunctions(t *testing.T) {
 	}
 	if got := binary.BigEndian.Uint16(req.payloads[0][2:4]); got != 42 {
 		t.Fatalf("expected register write payload 42, got %d", got)
+	}
+}
+
+func TestPingEndpointRunsFourAttempts(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+					return
+				}
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	ts, _ := newTestServer()
+	defer ts.Close()
+
+	pingReq := map[string]any{
+		"target":     ln.Addr().String(),
+		"timeout_ms": 200,
+	}
+	res := postJSON(t, ts.URL+"/api/ping", pingReq)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected ping status: %d", res.StatusCode)
+	}
+
+	var out struct {
+		AttemptsTotal int                 `json:"attempts_total"`
+		SuccessCount  int                 `json:"success_count"`
+		Attempts      []pingAttemptResult `json:"attempts"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AttemptsTotal != 4 {
+		t.Fatalf("expected 4 attempts total, got %d", out.AttemptsTotal)
+	}
+	if len(out.Attempts) != 4 {
+		t.Fatalf("expected 4 attempt rows, got %d", len(out.Attempts))
+	}
+	if out.SuccessCount != 4 {
+		t.Fatalf("expected 4 successful attempts, got %d", out.SuccessCount)
 	}
 }
 
