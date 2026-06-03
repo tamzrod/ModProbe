@@ -272,7 +272,7 @@ func TestWriteMapsToModbusWriteFunctions(t *testing.T) {
 	}
 }
 
-func TestPingEndpointRunsFourAttempts(t *testing.T) {
+func TestTestEndpointTCP(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen failed: %v", err)
@@ -299,38 +299,89 @@ func TestPingEndpointRunsFourAttempts(t *testing.T) {
 	ts, _ := newTestServer()
 	defer ts.Close()
 
-	pingReq := map[string]any{
+	testReq := map[string]any{
+		"type":       "tcp",
 		"target":     ln.Addr().String(),
-		"timeout_ms": 200,
+		"timeout_ms": 300,
 	}
-	res := postJSON(t, ts.URL+"/api/ping", pingReq)
+	res := postJSON(t, ts.URL+"/api/test", testReq)
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		t.Fatalf("unexpected ping status: %d", res.StatusCode)
+		t.Fatalf("unexpected test status: %d", res.StatusCode)
 	}
 
 	var out struct {
-		AttemptsTotal int                 `json:"attempts_total"`
-		SuccessCount  int                 `json:"success_count"`
-		Attempts      []pingAttemptResult `json:"attempts"`
+		Type      string `json:"type"`
+		Target    string `json:"target"`
+		Success   bool   `json:"success"`
+		LatencyMS int64  `json:"latency_ms"`
+		Error     string `json:"error"`
 	}
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
 		t.Fatal(err)
 	}
-	if out.AttemptsTotal != 4 {
-		t.Fatalf("expected 4 attempts total, got %d", out.AttemptsTotal)
+	if out.Type != "tcp" {
+		t.Fatalf("expected tcp type, got %q", out.Type)
 	}
-	if len(out.Attempts) != 4 {
-		t.Fatalf("expected 4 attempt rows, got %d", len(out.Attempts))
+	if out.Target != ln.Addr().String() {
+		t.Fatalf("unexpected target: %q", out.Target)
 	}
-	if out.SuccessCount != 4 {
-		t.Fatalf("expected 4 successful attempts, got %d", out.SuccessCount)
+	if !out.Success {
+		t.Fatalf("expected success, got false with error %q", out.Error)
 	}
 }
 
-func TestNormalizePingTarget(t *testing.T) {
+func TestTestEndpointICMP(t *testing.T) {
+	origICMP := icmpPingFn
+	defer func() { icmpPingFn = origICMP }()
+	icmpPingFn = func(host string, timeout time.Duration) (time.Duration, error) {
+		if host != "127.0.0.1" {
+			t.Fatalf("expected host 127.0.0.1, got %q", host)
+		}
+		if timeout != 250*time.Millisecond {
+			t.Fatalf("unexpected timeout: %v", timeout)
+		}
+		return 7 * time.Millisecond, nil
+	}
+
+	ts, _ := newTestServer()
+	defer ts.Close()
+
+	testReq := map[string]any{
+		"type":       "icmp",
+		"target":     "127.0.0.1:502",
+		"timeout_ms": 250,
+	}
+	res := postJSON(t, ts.URL+"/api/test", testReq)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected test status: %d", res.StatusCode)
+	}
+
+	var out struct {
+		Type      string `json:"type"`
+		Target    string `json:"target"`
+		Success   bool   `json:"success"`
+		LatencyMS int64  `json:"latency_ms"`
+		Error     string `json:"error"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Type != "icmp" {
+		t.Fatalf("expected icmp type, got %q", out.Type)
+	}
+	if out.Target != "127.0.0.1" {
+		t.Fatalf("unexpected target: %q", out.Target)
+	}
+	if !out.Success || out.LatencyMS != 7 || out.Error != "" {
+		t.Fatalf("unexpected response: %+v", out)
+	}
+}
+
+func TestNormalizeTCPTestTarget(t *testing.T) {
 	t.Run("host with port stays unchanged", func(t *testing.T) {
-		got, err := normalizePingTarget("192.168.0.10:503")
+		got, err := normalizeTCPTestTarget("192.168.0.10:503")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -340,7 +391,7 @@ func TestNormalizePingTarget(t *testing.T) {
 	})
 
 	t.Run("host without port gets default", func(t *testing.T) {
-		got, err := normalizePingTarget("localhost")
+		got, err := normalizeTCPTestTarget("localhost")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -350,7 +401,7 @@ func TestNormalizePingTarget(t *testing.T) {
 	})
 
 	t.Run("raw ipv6 gets default port", func(t *testing.T) {
-		got, err := normalizePingTarget("::1")
+		got, err := normalizeTCPTestTarget("::1")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -360,7 +411,46 @@ func TestNormalizePingTarget(t *testing.T) {
 	})
 
 	t.Run("invalid port fails", func(t *testing.T) {
-		_, err := normalizePingTarget("localhost:99999")
+		_, err := normalizeTCPTestTarget("localhost:99999")
+		if err == nil {
+			t.Fatal("expected error for invalid port")
+		}
+	})
+}
+
+func TestNormalizeICMPHost(t *testing.T) {
+	t.Run("host without port stays host", func(t *testing.T) {
+		got, err := normalizeICMPHost("localhost")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "localhost" {
+			t.Fatalf("unexpected host: %s", got)
+		}
+	})
+
+	t.Run("host with port strips port", func(t *testing.T) {
+		got, err := normalizeICMPHost("192.168.0.10:503")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "192.168.0.10" {
+			t.Fatalf("unexpected host: %s", got)
+		}
+	})
+
+	t.Run("raw ipv6 stays unchanged", func(t *testing.T) {
+		got, err := normalizeICMPHost("::1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "::1" {
+			t.Fatalf("unexpected host: %s", got)
+		}
+	})
+
+	t.Run("invalid port fails", func(t *testing.T) {
+		_, err := normalizeICMPHost("localhost:99999")
 		if err == nil {
 			t.Fatal("expected error for invalid port")
 		}

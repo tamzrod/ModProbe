@@ -46,7 +46,7 @@
       <label>IP:Port
         <div class="inline-controls">
           <input id="target" type="text" value="127.0.0.1:502" />
-          <button id="openPingBtn" class="small-btn" type="button">PING</button>
+          <button id="openTestBtn" class="small-btn" type="button">Test</button>
         </div>
       </label>
       <label>Unit ID
@@ -112,20 +112,32 @@
     </div>
   </div>
 
-  <div id="pingModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pingModalTitle" aria-describedby="pingModalDesc">
+  <div id="testModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="testModalTitle" aria-describedby="testModalDesc">
     <div class="modal-card">
       <div class="modal-header">
-        <h3 id="pingModalTitle">Ping Target (4x)</h3>
-        <button id="closePingBtn" type="button" aria-label="Close ping dialog">Close</button>
+        <h3 id="testModalTitle">Test Connection</h3>
+        <button id="closeTestBtn" type="button" aria-label="Close test dialog">Close</button>
       </div>
-      <p id="pingModalDesc" style="margin-top: 0; margin-bottom: 0.55rem; font-size: 0.86rem;">Edit the IP:Port and run a 4-attempt ping probe (uses the main Timeout ms value).</p>
+      <p id="testModalDesc" style="margin-top: 0; margin-bottom: 0.55rem; font-size: 0.86rem;">Choose the test type and run a connection diagnostic.</p>
       <label>IP:Port
-        <input id="pingTarget" type="text" />
+        <input id="testTarget" type="text" />
       </label>
       <div class="row" style="margin-top: 0.5rem; margin-bottom: 0;">
-        <button id="runPingBtn" type="button">Run Ping</button>
+        <label style="font-weight: 500;">
+          <input id="testTypeTcp" type="radio" name="testType" value="tcp" checked />
+          TCP Connection (Port Check)
+        </label>
       </div>
-      <div id="pingOutput" class="modal-output"></div>
+      <div class="row" style="margin-top: 0.2rem; margin-bottom: 0;">
+        <label style="font-weight: 500;">
+          <input id="testTypeIcmp" type="radio" name="testType" value="icmp" />
+          ICMP Ping
+        </label>
+      </div>
+      <div class="row" style="margin-top: 0.5rem; margin-bottom: 0;">
+        <button id="runTestBtn" type="button">Run Test</button>
+      </div>
+      <div id="testOutput" class="modal-output"></div>
     </div>
   </div>
 
@@ -148,12 +160,14 @@ const el = {
   lastRead: document.getElementById('lastRead'),
   pollStatus: document.getElementById('pollStatus'),
   errorText: document.getElementById('errorText'),
-  openPingBtn: document.getElementById('openPingBtn'),
-  pingModal: document.getElementById('pingModal'),
-  closePingBtn: document.getElementById('closePingBtn'),
-  pingTarget: document.getElementById('pingTarget'),
-  runPingBtn: document.getElementById('runPingBtn'),
-  pingOutput: document.getElementById('pingOutput')
+  openTestBtn: document.getElementById('openTestBtn'),
+  testModal: document.getElementById('testModal'),
+  closeTestBtn: document.getElementById('closeTestBtn'),
+  testTarget: document.getElementById('testTarget'),
+  testTypeTcp: document.getElementById('testTypeTcp'),
+  testTypeIcmp: document.getElementById('testTypeIcmp'),
+  runTestBtn: document.getElementById('runTestBtn'),
+  testOutput: document.getElementById('testOutput')
 };
 
 let statusTimer = null;
@@ -217,8 +231,8 @@ function setError(message = '') {
   el.errorText.textContent = message;
 }
 
-function setPingOutput(message = '') {
-  el.pingOutput.textContent = message;
+function setTestOutput(message = '') {
+  el.testOutput.textContent = message;
 }
 
 async function apiFetch(path, payload) {
@@ -237,35 +251,36 @@ async function apiFetch(path, payload) {
   return data;
 }
 
-function openPingModal() {
+function openTestModal() {
   previousActiveElement = document.activeElement;
-  el.pingTarget.value = el.target.value.trim();
-  setPingOutput('');
-  el.pingModal.classList.remove('hidden');
-  el.pingTarget.focus();
+  el.testTarget.value = el.target.value.trim();
+  el.testTypeTcp.checked = true;
+  setTestOutput('');
+  el.testModal.classList.remove('hidden');
+  el.testTarget.focus();
 }
 
-function closePingModal() {
-  el.pingModal.classList.add('hidden');
+function closeTestModal() {
+  el.testModal.classList.add('hidden');
   if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
     previousActiveElement.focus();
   }
 }
 
-function getPingModalFocusable() {
-  return [el.closePingBtn, el.pingTarget, el.runPingBtn]
+function getTestModalFocusable() {
+  return [el.closeTestBtn, el.testTarget, el.testTypeTcp, el.testTypeIcmp, el.runTestBtn]
     .filter((node) => node && !node.disabled);
 }
 
-function handlePingModalKeydown(event) {
-  if (el.pingModal.classList.contains('hidden')) return;
+function handleTestModalKeydown(event) {
+  if (el.testModal.classList.contains('hidden')) return;
   if (event.key === 'Escape') {
     event.preventDefault();
-    closePingModal();
+    closeTestModal();
     return;
   }
   if (event.key !== 'Tab') return;
-  const focusable = getPingModalFocusable();
+  const focusable = getTestModalFocusable();
   if (focusable.length === 0) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
@@ -280,32 +295,30 @@ function handlePingModalKeydown(event) {
   }
 }
 
-async function runPing() {
-  setPingOutput('Pinging...');
-  el.runPingBtn.disabled = true;
+function getSelectedTestType() {
+  return el.testTypeIcmp.checked ? 'icmp' : 'tcp';
+}
+
+async function runTest() {
+  setTestOutput('Running test...');
+  el.runTestBtn.disabled = true;
   try {
-    const data = await apiFetch('/api/ping', {
-      target: el.pingTarget.value.trim(),
+    const data = await apiFetch('/api/test', {
+      type: getSelectedTestType(),
+      target: el.testTarget.value.trim(),
       timeout_ms: Number(el.timeoutMs.value)
     });
-    if (!Array.isArray(data.attempts)) {
-      throw new Error('Server returned invalid ping results: expected array of attempts');
-    }
     const lines = [];
+    lines.push(`Type: ${data.type || 'unknown'}`);
     lines.push(`Target: ${data.target}`);
-    lines.push(`Success: ${data.success_count}/${data.attempts_total}`);
-    data.attempts.forEach((attemptResult) => {
-      if (attemptResult.success) {
-        lines.push(`Attempt ${attemptResult.attempt}: OK (${attemptResult.rtt_ms} ms)`);
-      } else {
-        lines.push(`Attempt ${attemptResult.attempt}: FAIL (${attemptResult.error || 'unknown error'})`);
-      }
-    });
-    setPingOutput(lines.join('\n'));
+    lines.push(`Status: ${data.success ? 'SUCCESS' : 'FAIL'}`);
+    lines.push(`Latency: ${Number.isFinite(data.latency_ms) ? `${data.latency_ms} ms` : 'N/A'}`);
+    lines.push(`Error: ${data.error || '-'}`);
+    setTestOutput(lines.join('\n'));
   } catch (err) {
-    setPingOutput(`Ping failed: ${err.message}`);
+    setTestOutput(`Test failed: ${err.message}`);
   } finally {
-    el.runPingBtn.disabled = false;
+    el.runTestBtn.disabled = false;
   }
 }
 
@@ -531,10 +544,10 @@ function ensureStatusTimer() {
 }
 
 el.readAllBtn.addEventListener('click', readAll);
-el.openPingBtn.addEventListener('click', openPingModal);
-el.closePingBtn.addEventListener('click', closePingModal);
-el.runPingBtn.addEventListener('click', runPing);
-document.addEventListener('keydown', handlePingModalKeydown);
+el.openTestBtn.addEventListener('click', openTestModal);
+el.closeTestBtn.addEventListener('click', closeTestModal);
+el.runTestBtn.addEventListener('click', runTest);
+document.addEventListener('keydown', handleTestModalKeydown);
 el.functionCode.addEventListener('change', clearRowsIfRangeChanged);
 el.startAddress.addEventListener('change', clearRowsIfRangeChanged);
 el.quantity.addEventListener('change', clearRowsIfRangeChanged);
