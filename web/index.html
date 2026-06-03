@@ -27,6 +27,14 @@
     .ok { background: #dcfce7; color: #166534; }
     .bad { background: #fee2e2; color: #991b1b; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .inline-controls { display: flex; gap: 0.35rem; align-items: center; }
+    .small-btn { padding: 0.35rem 0.5rem; font-size: 0.78rem; }
+    .modal { position: fixed; inset: 0; background: rgba(2, 6, 23, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+    .modal.hidden { display: none; }
+    .modal-card { width: min(540px, calc(100vw - 2rem)); background: #fff; border: 1px solid #dbe2ea; border-radius: 8px; padding: 0.9rem; }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.55rem; }
+    .modal-header h3 { margin: 0; font-size: 1rem; }
+    .modal-output { margin-top: 0.55rem; min-height: 120px; max-height: 260px; overflow: auto; white-space: pre-wrap; border: 1px solid #dbe2ea; border-radius: 6px; background: #f8fafc; padding: 0.55rem; font-size: 0.84rem; }
   </style>
 </head>
 <body>
@@ -36,7 +44,10 @@
     <h2>Config Panel</h2>
     <div class="row">
       <label>IP:Port
-        <input id="target" type="text" value="127.0.0.1:502" />
+        <div class="inline-controls">
+          <input id="target" type="text" value="127.0.0.1:502" />
+          <button id="openPingBtn" class="small-btn" type="button">PING</button>
+        </div>
       </label>
       <label>Unit ID
         <input id="unitId" type="number" min="0" max="255" value="1" />
@@ -101,6 +112,23 @@
     </div>
   </div>
 
+  <div id="pingModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="pingModalTitle" aria-describedby="pingModalDesc">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="pingModalTitle">Ping Target (4x)</h3>
+        <button id="closePingBtn" type="button" aria-label="Close ping dialog">Close</button>
+      </div>
+      <p id="pingModalDesc" style="margin-top: 0; margin-bottom: 0.55rem; font-size: 0.86rem;">Edit the IP:Port and run a 4-attempt ping probe (uses the main Timeout ms value).</p>
+      <label>IP:Port
+        <input id="pingTarget" type="text" />
+      </label>
+      <div class="row" style="margin-top: 0.5rem; margin-bottom: 0;">
+        <button id="runPingBtn" type="button">Run Ping</button>
+      </div>
+      <div id="pingOutput" class="modal-output"></div>
+    </div>
+  </div>
+
 <script>
 const rowsByAddress = new Map();
 const dirtyRows = new Set();
@@ -119,12 +147,19 @@ const el = {
   connStatus: document.getElementById('connStatus'),
   lastRead: document.getElementById('lastRead'),
   pollStatus: document.getElementById('pollStatus'),
-  errorText: document.getElementById('errorText')
+  errorText: document.getElementById('errorText'),
+  openPingBtn: document.getElementById('openPingBtn'),
+  pingModal: document.getElementById('pingModal'),
+  closePingBtn: document.getElementById('closePingBtn'),
+  pingTarget: document.getElementById('pingTarget'),
+  runPingBtn: document.getElementById('runPingBtn'),
+  pingOutput: document.getElementById('pingOutput')
 };
 
 let statusTimer = null;
 // Tracks the active range config so stale rows can be cleared when range changes.
 let lastRangeKey = '';
+let previousActiveElement = null;
 
 function getConfig() {
   return {
@@ -182,6 +217,10 @@ function setError(message = '') {
   el.errorText.textContent = message;
 }
 
+function setPingOutput(message = '') {
+  el.pingOutput.textContent = message;
+}
+
 async function apiFetch(path, payload) {
   const opts = payload
     ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
@@ -196,6 +235,78 @@ async function apiFetch(path, payload) {
     throw new Error(data.error || `HTTP ${res.status}`);
   }
   return data;
+}
+
+function openPingModal() {
+  previousActiveElement = document.activeElement;
+  el.pingTarget.value = el.target.value.trim();
+  setPingOutput('');
+  el.pingModal.classList.remove('hidden');
+  el.pingTarget.focus();
+}
+
+function closePingModal() {
+  el.pingModal.classList.add('hidden');
+  if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
+    previousActiveElement.focus();
+  }
+}
+
+function getPingModalFocusable() {
+  return [el.closePingBtn, el.pingTarget, el.runPingBtn]
+    .filter((node) => node && !node.disabled);
+}
+
+function handlePingModalKeydown(event) {
+  if (el.pingModal.classList.contains('hidden')) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closePingModal();
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const focusable = getPingModalFocusable();
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+    return;
+  }
+  if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+async function runPing() {
+  setPingOutput('Pinging...');
+  el.runPingBtn.disabled = true;
+  try {
+    const data = await apiFetch('/api/ping', {
+      target: el.pingTarget.value.trim(),
+      timeout_ms: Number(el.timeoutMs.value)
+    });
+    if (!Array.isArray(data.attempts)) {
+      throw new Error('Server returned invalid ping results: expected array of attempts');
+    }
+    const lines = [];
+    lines.push(`Target: ${data.target}`);
+    lines.push(`Success: ${data.success_count}/${data.attempts_total}`);
+    data.attempts.forEach((attemptResult) => {
+      if (attemptResult.success) {
+        lines.push(`Attempt ${attemptResult.attempt}: OK (${attemptResult.rtt_ms} ms)`);
+      } else {
+        lines.push(`Attempt ${attemptResult.attempt}: FAIL (${attemptResult.error || 'unknown error'})`);
+      }
+    });
+    setPingOutput(lines.join('\n'));
+  } catch (err) {
+    setPingOutput(`Ping failed: ${err.message}`);
+  } finally {
+    el.runPingBtn.disabled = false;
+  }
 }
 
 function renderRows() {
@@ -420,6 +531,10 @@ function ensureStatusTimer() {
 }
 
 el.readAllBtn.addEventListener('click', readAll);
+el.openPingBtn.addEventListener('click', openPingModal);
+el.closePingBtn.addEventListener('click', closePingModal);
+el.runPingBtn.addEventListener('click', runPing);
+document.addEventListener('keydown', handlePingModalKeydown);
 el.functionCode.addEventListener('change', clearRowsIfRangeChanged);
 el.startAddress.addEventListener('change', clearRowsIfRangeChanged);
 el.quantity.addEventListener('change', clearRowsIfRangeChanged);

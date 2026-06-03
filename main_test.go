@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -269,6 +270,101 @@ func TestWriteMapsToModbusWriteFunctions(t *testing.T) {
 	if got := binary.BigEndian.Uint16(req.payloads[0][2:4]); got != 42 {
 		t.Fatalf("expected register write payload 42, got %d", got)
 	}
+}
+
+func TestPingEndpointRunsFourAttempts(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen failed: %v", err)
+	}
+	defer ln.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+					return
+				}
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	ts, _ := newTestServer()
+	defer ts.Close()
+
+	pingReq := map[string]any{
+		"target":     ln.Addr().String(),
+		"timeout_ms": 200,
+	}
+	res := postJSON(t, ts.URL+"/api/ping", pingReq)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected ping status: %d", res.StatusCode)
+	}
+
+	var out struct {
+		AttemptsTotal int                 `json:"attempts_total"`
+		SuccessCount  int                 `json:"success_count"`
+		Attempts      []pingAttemptResult `json:"attempts"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	if out.AttemptsTotal != 4 {
+		t.Fatalf("expected 4 attempts total, got %d", out.AttemptsTotal)
+	}
+	if len(out.Attempts) != 4 {
+		t.Fatalf("expected 4 attempt rows, got %d", len(out.Attempts))
+	}
+	if out.SuccessCount != 4 {
+		t.Fatalf("expected 4 successful attempts, got %d", out.SuccessCount)
+	}
+}
+
+func TestNormalizePingTarget(t *testing.T) {
+	t.Run("host with port stays unchanged", func(t *testing.T) {
+		got, err := normalizePingTarget("192.168.0.10:503")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "192.168.0.10:503" {
+			t.Fatalf("unexpected target: %s", got)
+		}
+	})
+
+	t.Run("host without port gets default", func(t *testing.T) {
+		got, err := normalizePingTarget("localhost")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "localhost:502" {
+			t.Fatalf("unexpected target: %s", got)
+		}
+	})
+
+	t.Run("raw ipv6 gets default port", func(t *testing.T) {
+		got, err := normalizePingTarget("::1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "[::1]:502" {
+			t.Fatalf("unexpected target: %s", got)
+		}
+	})
+
+	t.Run("invalid port fails", func(t *testing.T) {
+		_, err := normalizePingTarget("localhost:99999")
+		if err == nil {
+			t.Fatal("expected error for invalid port")
+		}
+	})
 }
 
 func postJSON(t *testing.T, url string, payload any) *http.Response {

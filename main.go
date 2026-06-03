@@ -12,6 +12,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +25,7 @@ import (
 const (
 	defaultBindAddr      = "localhost:8080"
 	defaultTarget        = "127.0.0.1:502"
+	defaultTargetPort    = "502"
 	defaultUnitID        = 1
 	defaultTimeoutMS     = 500
 	defaultFunctionCode  = 3
@@ -33,6 +36,7 @@ const (
 	maxPollIntervalMS    = 60000
 	maxRegisterReadCount = 125
 	maxBitReadCount      = 2000
+	defaultPingAttempts  = 4
 	maxRequestBodySize   = 1 << 20
 	maxStoredErrorLength = 1000
 )
@@ -74,6 +78,18 @@ type writeRequest struct {
 type pollingStartRequest struct {
 	Config     connectionConfig `json:"config"`
 	IntervalMS int              `json:"interval_ms"`
+}
+
+type pingRequest struct {
+	Target    string `json:"target"`
+	TimeoutMS int    `json:"timeout_ms"`
+}
+
+type pingAttemptResult struct {
+	Attempt int    `json:"attempt"`
+	RTTMS   int64  `json:"rtt_ms,omitempty"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
 }
 
 type modbusRequester interface {
@@ -520,11 +536,42 @@ func (a *appState) routes() http.Handler {
 	mux.HandleFunc("/api/read/bulk", a.handleBulkRead)
 	mux.HandleFunc("/api/read/single", a.handleSingleRead)
 	mux.HandleFunc("/api/write/single", a.handleWriteSingle)
+	mux.HandleFunc("/api/ping", a.handlePing)
 	mux.HandleFunc("/api/polling/start", a.handlePollingStart)
 	mux.HandleFunc("/api/polling/stop", a.handlePollingStop)
 	mux.HandleFunc("/api/status", a.handleStatus)
 	mux.Handle("/", http.FileServer(http.Dir("web")))
 	return mux
+}
+
+func normalizePingTarget(target string) (string, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		target = defaultTarget
+	}
+	if host, port, err := net.SplitHostPort(target); err == nil {
+		if strings.TrimSpace(host) == "" {
+			return "", errors.New("invalid target: host cannot be empty")
+		}
+		portNum, convErr := strconv.Atoi(port)
+		if convErr != nil || portNum < 1 || portNum > 65535 {
+			return "", errors.New("invalid target: port must be between 1 and 65535")
+		}
+		return target, nil
+	}
+	defaultPortNum, convErr := strconv.Atoi(defaultTargetPort)
+	if convErr != nil || defaultPortNum < 1 || defaultPortNum > 65535 {
+		return "", fmt.Errorf("default target port %q is misconfigured", defaultTargetPort)
+	}
+	if strings.Contains(target, ":") {
+		// Allow raw IPv6 address without port; bracket + append default port.
+		if ip := net.ParseIP(target); ip != nil && ip.To4() == nil {
+			return net.JoinHostPort(target, defaultTargetPort), nil
+		}
+		return "", errors.New("invalid target: expected host:port or valid IPv6 address")
+	}
+	// Hostname or IPv4 without port; append default Modbus port.
+	return net.JoinHostPort(target, defaultTargetPort), nil
 }
 
 func (a *appState) handleBulkRead(w http.ResponseWriter, r *http.Request) {
@@ -593,6 +640,58 @@ func (a *appState) handleWriteSingle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonWrite(w, http.StatusOK, map[string]any{"row": row})
+}
+
+func (a *appState) handlePing(w http.ResponseWriter, r *http.Request) {
+	if !methodGuard(w, r, http.MethodPost) {
+		return
+	}
+	var req pingRequest
+	if !decodeJSONBody(w, r, &req) {
+		return
+	}
+	target, err := normalizePingTarget(req.Target)
+	if err != nil {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	if req.TimeoutMS == 0 {
+		req.TimeoutMS = defaultTimeoutMS
+	}
+	if req.TimeoutMS < 1 || req.TimeoutMS > maxTimeoutMS {
+		jsonWrite(w, http.StatusBadRequest, map[string]string{"error": "timeout_ms out of range"})
+		return
+	}
+	timeout := time.Duration(req.TimeoutMS) * time.Millisecond
+	results := make([]pingAttemptResult, 0, defaultPingAttempts)
+	successCount := 0
+
+	for i := 1; i <= defaultPingAttempts; i++ {
+		start := time.Now()
+		conn, dialErr := net.DialTimeout("tcp", target, timeout)
+		if dialErr != nil {
+			results = append(results, pingAttemptResult{
+				Attempt: i,
+				Success: false,
+				Error:   dialErr.Error(),
+			})
+			continue
+		}
+		_ = conn.Close()
+		successCount++
+		results = append(results, pingAttemptResult{
+			Attempt: i,
+			Success: true,
+			RTTMS:   time.Since(start).Milliseconds(),
+		})
+	}
+
+	jsonWrite(w, http.StatusOK, map[string]any{
+		"target":         target,
+		"attempts_total": defaultPingAttempts,
+		"success_count":  successCount,
+		"attempts":       results,
+	})
 }
 
 func (a *appState) handlePollingStart(w http.ResponseWriter, r *http.Request) {
