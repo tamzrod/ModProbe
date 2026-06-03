@@ -123,6 +123,7 @@ const el = {
 };
 
 let statusTimer = null;
+// Tracks the active range config so stale rows can be cleared when range changes.
 let lastRangeKey = '';
 
 function getConfig() {
@@ -136,7 +137,7 @@ function getConfig() {
   };
 }
 
-function getRangeKey() {
+function getCurrentRangeKey() {
   return `${Number(el.functionCode.value)}:${Number(el.startAddress.value)}:${Number(el.quantity.value)}`;
 }
 
@@ -284,18 +285,21 @@ function syncRows(rows) {
 }
 
 function replaceRows(rows) {
-  rowsByAddress.clear();
-  dirtyRows.clear();
+  clearRows();
   syncRows(rows);
 }
 
-function clearRowsIfRangeChanged() {
-  const nextKey = getRangeKey();
-  if (nextKey === lastRangeKey) return;
-  lastRangeKey = nextKey;
+function clearRows() {
   rowsByAddress.clear();
   dirtyRows.clear();
   renderRows();
+}
+
+function clearRowsIfRangeChanged() {
+  const nextKey = getCurrentRangeKey();
+  if (nextKey === lastRangeKey) return;
+  lastRangeKey = nextKey;
+  clearRows();
 }
 
 async function readAll() {
@@ -403,7 +407,7 @@ el.pollEnable.addEventListener('change', async () => {
 });
 
 ensureStatusTimer();
-lastRangeKey = getRangeKey();
+lastRangeKey = getCurrentRangeKey();
 readAll();
 </script>
 </body>
